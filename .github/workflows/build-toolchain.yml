@@ -185,13 +185,23 @@ jobs:
     name: Fetch upstream prebuilt (windows_amd64)
     runs-on: ubuntu-24.04
     steps:
-      - name: Download + verify upstream release asset
+      # NOTE: und3ath/ollvm's actual release-producing workflow (ollvm-build.yml)
+      # does not call actions/attest-build-provenance -- that permission only
+      # exists in a different, inherited-from-upstream-LLVM workflow
+      # (release-binaries-all.yml) that is NOT what builds these specific
+      # assets. `gh attestation verify` correctly reports "no attestations
+      # found" for them; don't call it here. Our own provenance guarantee
+      # instead comes from: (a) pinning to an explicit release tag, never
+      # `latest`, matching the same commit as OLLVM_COMMIT, and (b) the
+      # `publish` job's own actions/attest-build-provenance on everything we
+      # re-publish from this repo.
+      - name: Download upstream release asset (pinned tag, not latest)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p out
-          gh release download --repo und3ath/ollvm --pattern 'ollvm22-windows-Release.7z' --dir out
-          gh attestation verify out/ollvm22-windows-Release.7z --repo und3ath/ollvm
+          gh release download v0.5.0 --repo und3ath/ollvm --pattern 'ollvm22-windows-Release.7z' --dir out
+          sha256sum out/ollvm22-windows-Release.7z
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
