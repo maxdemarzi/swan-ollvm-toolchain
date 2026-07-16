@@ -23,11 +23,25 @@ jobs:
           docker system prune -af || true
           df -h
 
+      # ccache only survives within a single job's own processes -- each job
+      # run gets a fresh runner VM, so without this the container's ccache
+      # starts cold on every iteration of this (still being debugged)
+      # workflow. Cache the host-side dir and bind-mount it into the
+      # container, keyed on the pinned commit so a real content change still
+      # gets a clean cache.
+      - name: Cache ccache dir
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ollvm-ccache-linux_amd64-${{ hashFiles('OLLVM_COMMIT') }}
+          restore-keys: ollvm-ccache-linux_amd64-
+
       - name: Build inside manylinux_2_28_x86_64
         run: |
           OLLVM_REF=$(cat OLLVM_COMMIT)
           mkdir -p out
-          docker run --rm -v "${{ github.workspace }}":/work -w /work quay.io/pypa/manylinux_2_28_x86_64 bash -lc "
+          mkdir -p "${{ github.workspace }}/.ccache"
+          docker run --rm -v "${{ github.workspace }}":/work -w /work -e CCACHE_DIR=/work/.ccache quay.io/pypa/manylinux_2_28_x86_64 bash -lc "
             set -euxo pipefail
             yum groupinstall -y 'Development Tools'
             yum install -y curl zip unzip tar autoconf libtool ninja-build ccache python3 zstd wget jq git clang
@@ -55,6 +69,7 @@ jobs:
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DCMAKE_INSTALL_PREFIX=/work/install
             cmake --build build --parallel --target install clang lld opt
+            ccache -s
 
             echo 'int main(void){return 0;}' > /tmp/t.c
             /work/install/bin/clang /tmp/t.c -o /tmp/t
@@ -88,11 +103,19 @@ jobs:
           docker system prune -af || true
           df -h
 
+      - name: Cache ccache dir
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ollvm-ccache-linux_arm64-${{ hashFiles('OLLVM_COMMIT') }}
+          restore-keys: ollvm-ccache-linux_arm64-
+
       - name: Build inside manylinux_2_28_aarch64
         run: |
           OLLVM_REF=$(cat OLLVM_COMMIT)
           mkdir -p out
-          docker run --rm -v "${{ github.workspace }}":/work -w /work quay.io/pypa/manylinux_2_28_aarch64 bash -lc "
+          mkdir -p "${{ github.workspace }}/.ccache"
+          docker run --rm -v "${{ github.workspace }}":/work -w /work -e CCACHE_DIR=/work/.ccache quay.io/pypa/manylinux_2_28_aarch64 bash -lc "
             set -euxo pipefail
             yum groupinstall -y 'Development Tools'
             yum install -y curl zip unzip tar autoconf libtool ninja-build ccache python3 zstd wget jq git clang
@@ -117,6 +140,7 @@ jobs:
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DCMAKE_INSTALL_PREFIX=/work/install
             cmake --build build --parallel --target install clang lld opt
+            ccache -s
 
             echo 'int main(void){return 0;}' > /tmp/t.c
             /work/install/bin/clang /tmp/t.c -o /tmp/t
@@ -145,12 +169,27 @@ jobs:
       - name: Install deps
         run: brew install ninja ccache zstd
 
+      - name: Cache ccache dir
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ollvm-ccache-osx_universal-${{ hashFiles('OLLVM_COMMIT') }}
+          max-size: 5G
+
       - name: Build ollvm (X86 + AArch64 backends, one toolchain for both targets)
         run: |
           OLLVM_REF=$(cat OLLVM_COMMIT)
           git clone --filter=blob:none https://github.com/maxdemarzi/ollvm.git llvm-src
           cd llvm-src
           git checkout "$OLLVM_REF"
+
+          # A self-built clang has no default sysroot -- unlike Apple's own
+          # clang wrapper, it won't auto-discover the Xcode SDK, so plain
+          # `clang foo.c -o foo` fails to link with "library 'System' not
+          # found". Bake the SDK path in at build time (DEFAULT_SYSROOT) so
+          # every downstream consumer of this toolchain (including Swan's own
+          # build later) doesn't need special -isysroot handling.
+          SDKROOT_PATH=$(xcrun --show-sdk-path)
+          echo "Using SDK: $SDKROOT_PATH"
 
           cmake -S llvm -B build -G Ninja \
             -DLLVM_ENABLE_PROJECTS="clang;lld" \
@@ -160,11 +199,13 @@ jobs:
             -DLLVM_INCLUDE_TESTS=OFF -DLLVM_BUILD_TESTS=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DDEFAULT_SYSROOT="$SDKROOT_PATH" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install"
           cmake --build build --parallel --target install clang lld opt
+          ccache -s
 
           echo 'int main(void){return 0;}' > /tmp/t.c
           "${{ github.workspace }}/install/bin/clang" -arch arm64 /tmp/t.c -o /tmp/t_arm64
