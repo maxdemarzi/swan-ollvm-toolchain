@@ -28,7 +28,7 @@ glibc symbol versioning isn't backward-compatible. So:
 
 | Target | Source |
 |---|---|
-| `windows_amd64` | Downloaded directly from `und3ath/ollvm`'s own GitHub Release, verified via `gh attestation verify` before re-publishing here |
+| `windows_amd64` | Downloaded directly from `und3ath/ollvm`'s own pinned GitHub Release tag (never `latest`), re-published here with a SHA256 checksum. `gh attestation verify` isn't applicable -- `und3ath/ollvm`'s actual release-producing workflow doesn't generate attestations for these assets |
 | `linux_amd64` | Built from source in this repo, inside `quay.io/pypa/manylinux_2_28_x86_64` (matches Swan's actual compile environment for glibc/ABI compatibility) |
 | `linux_arm64` | Built from source in this repo, inside `quay.io/pypa/manylinux_2_28_aarch64`, natively on an arm64 runner |
 | `osx_amd64` + `osx_arm64` | Built **once**, natively, on `macos-15` (Apple Silicon) with both `X86` and `AArch64` LLVM backends enabled -- Swan's own CI already cross-builds `osx_amd64` from the same arm64 host via `-arch x86_64`, so one universal-capable toolchain build serves both targets |
