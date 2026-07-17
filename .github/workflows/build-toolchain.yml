@@ -318,6 +318,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -330,13 +332,17 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      # actions/attest-build-provenance is unavailable on user-owned private
-      # repos ("Feature not available for user-owned private repositories" --
-      # a GitHub platform limitation, not something fixable here). Making this
-      # repo public just to get attestations isn't worth it given it's
-      # deliberately private (obfuscation/IP-protection tooling). SHA256SUMS.txt
-      # plus the pinned OLLVM_COMMIT + this workflow's own auditable history
-      # are the integrity guarantees instead.
+      # Re-enabled now that this repo is public -- actions/attest-build-provenance
+      # previously failed here with "Feature not available for user-owned
+      # private repositories" (a GitHub platform limitation on private
+      # user-owned repos, not fixable in the workflow). toolchain-v1 itself
+      # was published manually before this was public, so it has no
+      # attestation; this covers every release from here on.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
+        with:
+          subject-path: artifacts/*
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
