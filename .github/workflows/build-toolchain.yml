@@ -28,9 +28,13 @@ jobs:
       # starts cold on every iteration of this (still being debugged)
       # workflow. Cache the host-side dir and bind-mount it into the
       # container, keyed on the pinned commit so a real content change still
-      # gets a clean cache.
-      - name: Cache ccache dir
-        uses: actions/cache@v4
+      # gets a clean cache. Split restore/save (not the combined actions/cache
+      # action) with `if: always()` on save -- the combined action skips
+      # saving entirely whenever an earlier step fails, which cost us two
+      # separate multi-hour cold Linux builds to unrelated bugs further down
+      # this same script.
+      - name: Restore ccache dir
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/.ccache
           key: ollvm-ccache-linux_amd64-${{ hashFiles('OLLVM_COMMIT') }}
@@ -102,8 +106,17 @@ jobs:
               && echo 'OK: defaults to libstdc++' \
               || (echo 'FAIL: does not default to libstdc++' && cat /tmp/link.log && exit 1)
 
-            cd /work/install && tar --zstd -cf /work/out/ollvm-clang-linux_amd64.tar.zst .
+            # manylinux_2_28's tar predates the --zstd convenience flag --
+            # use -I (--use-compress-program), a much older/more portable option.
+            cd /work/install && tar -I zstd -cf /work/out/ollvm-clang-linux_amd64.tar.zst .
           "
+
+      - name: Save ccache dir
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ollvm-ccache-linux_amd64-${{ hashFiles('OLLVM_COMMIT') }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -124,8 +137,8 @@ jobs:
           docker system prune -af || true
           df -h
 
-      - name: Cache ccache dir
-        uses: actions/cache@v4
+      - name: Restore ccache dir
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/.ccache
           key: ollvm-ccache-linux_arm64-${{ hashFiles('OLLVM_COMMIT') }}
@@ -190,8 +203,16 @@ jobs:
               && echo 'OK: defaults to libstdc++' \
               || (echo 'FAIL: does not default to libstdc++' && cat /tmp/link.log && exit 1)
 
-            cd /work/install && tar --zstd -cf /work/out/ollvm-clang-linux_arm64.tar.zst .
+            # See linux_amd64 for why -I zstd, not --zstd.
+            cd /work/install && tar -I zstd -cf /work/out/ollvm-clang-linux_arm64.tar.zst .
           "
+
+      - name: Save ccache dir
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ollvm-ccache-linux_arm64-${{ hashFiles('OLLVM_COMMIT') }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
