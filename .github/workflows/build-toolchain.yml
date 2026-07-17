@@ -90,10 +90,17 @@ jobs:
             /tmp/t
 
             # ABI smoke check: this build must default to system libstdc++ (to
-            # match GCC-built vcpkg static libs, e.g. highs), not libc++.
-            echo | /work/install/bin/clang++ -E -v -xc++ - 2>&1 | grep -q -- '-lstdc++' \
+            # match GCC-built vcpkg static libs, e.g. highs), not libc++. Must
+            # be a real compile+link (not -E, which stops before linking and
+            # so never shows a linker invocation at all -- an earlier version
+            # of this check always failed for that reason regardless of the
+            # real default, since libcxx was never built here anyway).
+            echo 'int main(void){return 0;}' > /tmp/t.cpp
+            /work/install/bin/clang++ /tmp/t.cpp -o /tmp/t_cpp -v > /tmp/link.log 2>&1
+            /tmp/t_cpp
+            grep -q -- '-lstdc++' /tmp/link.log \
               && echo 'OK: defaults to libstdc++' \
-              || (echo 'FAIL: does not default to libstdc++' && exit 1)
+              || (echo 'FAIL: does not default to libstdc++' && cat /tmp/link.log && exit 1)
 
             cd /work/install && tar --zstd -cf /work/out/ollvm-clang-linux_amd64.tar.zst .
           "
@@ -174,9 +181,14 @@ jobs:
             /work/install/bin/clang /tmp/t.c -o /tmp/t
             /tmp/t
 
-            echo | /work/install/bin/clang++ -E -v -xc++ - 2>&1 | grep -q -- '-lstdc++' \
+            # See the linux_amd64 job for why this must be a real compile+link
+            # rather than -E, which never shows a linker invocation at all.
+            echo 'int main(void){return 0;}' > /tmp/t.cpp
+            /work/install/bin/clang++ /tmp/t.cpp -o /tmp/t_cpp -v > /tmp/link.log 2>&1
+            /tmp/t_cpp
+            grep -q -- '-lstdc++' /tmp/link.log \
               && echo 'OK: defaults to libstdc++' \
-              || (echo 'FAIL: does not default to libstdc++' && exit 1)
+              || (echo 'FAIL: does not default to libstdc++' && cat /tmp/link.log && exit 1)
 
             cd /work/install && tar --zstd -cf /work/out/ollvm-clang-linux_arm64.tar.zst .
           "
