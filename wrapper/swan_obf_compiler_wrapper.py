@@ -82,28 +82,46 @@ def run(cmd):
         sys.exit(proc.returncode)
 
 
-def extra_link_args(real):
-    """-L<install>/lib, injected explicitly rather than relying on clang's
-    own default-config-file auto-discovery (clang.cfg/clang++.cfg, see
-    clang/docs/UsersManual.md). That auto-discovery is keyed off the
-    *invoked* executable's exact basename, and empirically does not follow
-    through to a renamed binary the way its docs suggest it should --
-    renaming clang++.cfg to clang++.real.cfg alongside clang++.real still
-    left the linker unable to find our bundled static libc++/libc++abi
-    (undefined ___gxx_personality_v0, confirmed via a diagnostic CI matrix).
-    Since every invocation of the real compiler already flows through this
-    script, injecting -L explicitly removes the dependency on that
-    fragile name-matching behavior entirely."""
+def extra_link_args(real, kind):
+    """-L<install>/lib plus, for C++, explicit -lc++abi -lc++.
+
+    Two independent problems, both traced to renaming clang++ to
+    clang++.real (see wrap_toolchain.sh):
+
+    1. clang's default-config-file auto-discovery (clang.cfg/clang++.cfg,
+       see clang/docs/UsersManual.md) is keyed off the *invoked*
+       executable's exact basename, and empirically does not follow
+       through to a renamed binary the way its docs suggest it should --
+       so -L<install>/lib is injected explicitly here instead.
+
+    2. Apple's Darwin driver implicitly adds -lc++ (and transitively
+       libc++abi) when it recognizes it's linking C++ -- but that
+       recognition also appears to be name-based (argv[0] containing
+       "clang++"), not e.g. based on object file content. Linking a .o
+       file (as opposed to compiling a .cpp file straight through)
+       through "clang++.real" produced a link with *zero* C++ runtime
+       symbols resolved at all (undefined ___gxx_personality_v0,
+       ___cxa_throw, vtable/typeinfo for the thrown type, etc.) even
+       though the object file itself was compiled correctly -- adding -L
+       alone did not fix it. Confirmed directly (bypassing this wrapper
+       entirely) that -lc++abi -lc++ resolves it completely. -L alone is
+       still correct/sufficient for the C case, which has no such
+       implicit-runtime-linking behavior to lose.
+    """
     libdir = os.path.normpath(os.path.join(os.path.dirname(real), "..", "lib"))
-    if os.path.isdir(libdir):
-        return ["-L", libdir]
-    return []
+    if not os.path.isdir(libdir):
+        return []
+    args = ["-L", libdir]
+    if kind == "cxx" and os.path.isfile(os.path.join(libdir, "libc++.a")):
+        args += ["-lc++abi", "-lc++"]
+    return args
 
 
 def main():
     args = sys.argv[1:]
+    kind = os.environ.get("SWAN_OBF_KIND")
     real = real_compiler()
-    link_args = extra_link_args(real)
+    link_args = extra_link_args(real, kind)
 
     invocation = find_compile_invocation(args)
     if invocation is None:
