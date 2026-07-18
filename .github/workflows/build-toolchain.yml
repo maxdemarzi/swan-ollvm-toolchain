@@ -106,6 +106,8 @@ jobs:
               && echo 'OK: defaults to libstdc++' \
               || (echo 'FAIL: does not default to libstdc++' && cat /tmp/link.log && exit 1)
 
+            sh /work/wrapper/wrap_toolchain.sh /work/install
+
             # manylinux_2_28's tar predates the --zstd convenience flag --
             # use -I (--use-compress-program), a much older/more portable option.
             cd /work/install && tar -I zstd -cf /work/out/ollvm-clang-linux_amd64.tar.zst .
@@ -203,6 +205,8 @@ jobs:
               && echo 'OK: defaults to libstdc++' \
               || (echo 'FAIL: does not default to libstdc++' && cat /tmp/link.log && exit 1)
 
+            sh /work/wrapper/wrap_toolchain.sh /work/install
+
             # See linux_amd64 for why -I zstd, not --zstd.
             cd /work/install && tar -I zstd -cf /work/out/ollvm-clang-linux_arm64.tar.zst .
           "
@@ -272,6 +276,8 @@ jobs:
           "${{ github.workspace }}/install/bin/clang" -arch arm64 /tmp/t.c -o /tmp/t_arm64
           "${{ github.workspace }}/install/bin/clang" -arch x86_64 /tmp/t.c -o /tmp/t_x86_64
           /tmp/t_arm64
+
+          sh "${{ github.workspace }}/wrapper/wrap_toolchain.sh" "${{ github.workspace }}/install"
 
           mkdir -p "${{ github.workspace }}/out"
           cd "${{ github.workspace }}/install" && tar --zstd -cf "${{ github.workspace }}/out/ollvm-clang-osx_universal.tar.zst" .
