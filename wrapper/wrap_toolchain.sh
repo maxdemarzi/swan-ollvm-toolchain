@@ -22,12 +22,20 @@ cp "$SCRIPT_DIR/swan_obf_compiler_wrapper.py" "$BIN_DIR/swan_obf_compiler_wrappe
 chmod +x "$BIN_DIR/swan_obf_compiler_wrapper.py"
 
 # macOS builds ship a default config file (clang.cfg/clang++.cfg, see
-# clang/docs/UsersManual.md "Configuration files") so the bundled static
-# libc++ is found at link time. Clang loads it by the *invoked* executable's
-# name -- since the wrapper always execs clang.real/clang++.real, the config
-# must follow the rename too, or it silently stops being picked up.
-[ -f "$BIN_DIR/clang.cfg" ] && mv "$BIN_DIR/clang.cfg" "$BIN_DIR/clang.real.cfg"
-[ -f "$BIN_DIR/clang++.cfg" ] && mv "$BIN_DIR/clang++.cfg" "$BIN_DIR/clang++.real.cfg"
+# clang/docs/UsersManual.md "Configuration files") with -L<install>/lib so
+# the bundled static libc++ is found at link time -- this works for the
+# *original* clang/clang++ names (see build-toolchain.yml's own smoke
+# test), but empirically does NOT follow through to a renamed binary the
+# way the docs suggest it should (confirmed via a diagnostic CI matrix:
+# renaming clang++.cfg to clang++.real.cfg alongside clang++.real still
+# left every invocation of clang++.real unable to find libc++abi.a at all,
+# undefined ___gxx_personality_v0). So swan_obf_compiler_wrapper.py injects
+# -L explicitly itself instead of relying on this auto-discovery for the
+# clang.real/clang++.real names it actually invokes -- the .cfg files are
+# left in place, unrenamed, purely for anyone invoking the *original*
+# clang/clang++ names directly (which no longer exist after this rename,
+# but doesn't hurt to leave them for e.g. manual debugging via clang.real
+# with an explicit --config flag).
 
 write_trampoline() {
     name=$1
@@ -66,15 +74,13 @@ SMOKE
 "$BIN_DIR/clang++" "$TMP_DIR/smoke.o" -o "$TMP_DIR/smoke"
 "$TMP_DIR/smoke"
 
-# Smoke check 3 (macOS only, where clang.real.cfg exists): diagnostic
-# matrix isolating which variable actually causes the intermittent
-# "undefined std::length_error[abi:...]" failure -- seen through the
-# wrapper with -std=c++17, but NOT in the equivalent unwrapped single-shot
-# compile+link without -std=c++17. Crosses: wrapped vs unwrapped compiler,
-# -std=c++17 vs compiler default, and single-invocation vs split
-# compile-then-link. Deliberately non-fatal (temporarily) so the full
-# matrix runs and reports before this becomes a hard gate again.
-if [ -f "$BIN_DIR/clang++.real.cfg" ]; then
+# Smoke check 3 (macOS only, where a bundled static libc++ exists): confirm
+# the wrapper's own explicit -L injection (see extra_link_args() in
+# swan_obf_compiler_wrapper.py) resolves the bundled static libc++/
+# libc++abi through both the compile (3-step) and passthrough (link) paths
+# -- split into separate compile/link invocations and with -std=c++17, to
+# match real swan usage exactly.
+if [ -f "$INSTALL_DIR/lib/libc++.a" ]; then
     cat > "$TMP_DIR/stdexcept_smoke.cpp" <<'SMOKE2'
 #include <stdexcept>
 int main() {
@@ -83,37 +89,14 @@ int main() {
     return 1;
 }
 SMOKE2
-
-    run_variant() {
-        label=$1
-        cxx=$2
-        std_flag=$3
-        split=$4
-        out="$TMP_DIR/out_$label"
-        if [ "$split" = "split" ]; then
-            if "$cxx" $std_flag -arch arm64 -mmacosx-version-min=11.0 -c "$TMP_DIR/stdexcept_smoke.cpp" -o "$out.o" > "$TMP_DIR/$label.compile.log" 2>&1 \
-               && "$cxx" -arch arm64 -mmacosx-version-min=11.0 "$out.o" -o "$out" > "$TMP_DIR/$label.link.log" 2>&1; then
-                echo "DIAG $label: PASS"
-            else
-                echo "DIAG $label: FAIL"
-                tail -5 "$TMP_DIR/$label.compile.log" "$TMP_DIR/$label.link.log" 2>/dev/null | sed "s/^/DIAG $label:   /"
-            fi
-        else
-            if "$cxx" $std_flag -arch arm64 -mmacosx-version-min=11.0 "$TMP_DIR/stdexcept_smoke.cpp" -o "$out" > "$TMP_DIR/$label.log" 2>&1; then
-                echo "DIAG $label: PASS"
-            else
-                echo "DIAG $label: FAIL"
-                tail -5 "$TMP_DIR/$label.log" | sed "s/^/DIAG $label:   /"
-            fi
-        fi
-    }
-
-    run_variant unwrapped_nostd_combined  "$BIN_DIR/clang++.real" ""            combined
-    run_variant unwrapped_std17_combined  "$BIN_DIR/clang++.real" "-std=c++17"  combined
-    run_variant unwrapped_nostd_split     "$BIN_DIR/clang++.real" ""            split
-    run_variant unwrapped_std17_split     "$BIN_DIR/clang++.real" "-std=c++17"  split
-    run_variant wrapped_nostd_split       "$BIN_DIR/clang++"      ""            split
-    run_variant wrapped_std17_split       "$BIN_DIR/clang++"      "-std=c++17"  split
+    "$BIN_DIR/clang++" -std=c++17 -arch arm64 -mmacosx-version-min=11.0 -c "$TMP_DIR/stdexcept_smoke.cpp" -o "$TMP_DIR/stdexcept_smoke.o"
+    "$BIN_DIR/clang++" -arch arm64 -mmacosx-version-min=11.0 "$TMP_DIR/stdexcept_smoke.o" -o "$TMP_DIR/stdexcept_smoke"
+    "$TMP_DIR/stdexcept_smoke"
+    if otool -L "$TMP_DIR/stdexcept_smoke" | grep -qi 'libc++'; then
+        echo "wrap_toolchain.sh: FAIL -- still dynamically linked against a system libc++ after wrapping"
+        otool -L "$TMP_DIR/stdexcept_smoke"
+        exit 1
+    fi
 fi
 
 echo "wrap_toolchain.sh: wrapped $BIN_DIR/clang and $BIN_DIR/clang++"

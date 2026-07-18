@@ -82,13 +82,32 @@ def run(cmd):
         sys.exit(proc.returncode)
 
 
+def extra_link_args(real):
+    """-L<install>/lib, injected explicitly rather than relying on clang's
+    own default-config-file auto-discovery (clang.cfg/clang++.cfg, see
+    clang/docs/UsersManual.md). That auto-discovery is keyed off the
+    *invoked* executable's exact basename, and empirically does not follow
+    through to a renamed binary the way its docs suggest it should --
+    renaming clang++.cfg to clang++.real.cfg alongside clang++.real still
+    left the linker unable to find our bundled static libc++/libc++abi
+    (undefined ___gxx_personality_v0, confirmed via a diagnostic CI matrix).
+    Since every invocation of the real compiler already flows through this
+    script, injecting -L explicitly removes the dependency on that
+    fragile name-matching behavior entirely."""
+    libdir = os.path.normpath(os.path.join(os.path.dirname(real), "..", "lib"))
+    if os.path.isdir(libdir):
+        return ["-L", libdir]
+    return []
+
+
 def main():
     args = sys.argv[1:]
     real = real_compiler()
+    link_args = extra_link_args(real)
 
     invocation = find_compile_invocation(args)
     if invocation is None:
-        os.execv(real, [real] + args)  # linking, --version, -E/-S, etc.
+        os.execv(real, [real] + args + link_args)  # linking, --version, -E/-S, etc.
 
     source_idx, output_idx = invocation
     source_file = args[source_idx]
