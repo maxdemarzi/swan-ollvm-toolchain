@@ -80,8 +80,13 @@ int main() {
     return 1;
 }
 SMOKE2
-    "$BIN_DIR/clang++" -std=c++17 -c "$TMP_DIR/stdexcept_smoke.cpp" -o "$TMP_DIR/stdexcept_smoke.o"
-    "$BIN_DIR/clang++" "$TMP_DIR/stdexcept_smoke.o" -o "$TMP_DIR/stdexcept_smoke"
+    # -mmacosx-version-min must match what RUNTIMES_CMAKE_ARGS built
+    # libcxx/libcxxabi for (see build-toolchain.yml) -- a mismatch here
+    # changes libc++'s internal hidden-ABI tag hash and produces the exact
+    # "undefined std::length_error[abi:...]" symptom this smoke test exists
+    # to catch, even though the bundled static lib itself is fine.
+    "$BIN_DIR/clang++" -std=c++17 -arch arm64 -mmacosx-version-min=11.0 -c "$TMP_DIR/stdexcept_smoke.cpp" -o "$TMP_DIR/stdexcept_smoke.o"
+    "$BIN_DIR/clang++" -arch arm64 -mmacosx-version-min=11.0 "$TMP_DIR/stdexcept_smoke.o" -o "$TMP_DIR/stdexcept_smoke"
     "$TMP_DIR/stdexcept_smoke"
     if otool -L "$TMP_DIR/stdexcept_smoke" | grep -qi 'libc++'; then
         echo "wrap_toolchain.sh: FAIL -- still dynamically linked against a system libc++ after wrapping"
