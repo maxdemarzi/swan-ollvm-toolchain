@@ -296,7 +296,6 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install"
           cmake --build build --parallel --target install clang lld opt
           ccache -s
