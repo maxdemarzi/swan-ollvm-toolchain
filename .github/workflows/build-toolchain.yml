@@ -256,8 +256,36 @@ jobs:
           SDKROOT_PATH=$(xcrun --show-sdk-path)
           echo "Using SDK: $SDKROOT_PATH"
 
+          # Bundle our own statically-linked libc++/libc++abi instead of
+          # relying on whatever SDK/system libc++.dylib happens to be active
+          # wherever this toolchain gets used. Without this, a vanilla
+          # upstream (non-Apple-patched) clang targeting an old
+          # -mmacosx-version-min against a newer SDK can hit a genuine,
+          # deterministic ABI mismatch -- confirmed via a real CI failure:
+          # undefined `std::length_error::length_error[abi:ne190102]` linking
+          # swan_extension.cpp.o against Xcode 16.4's SDK/system libc++.
+          # LIBCXX_ENABLE_VENDOR_AVAILABILITY_ANNOTATIONS (default OFF) is
+          # exactly the mechanism that ties symbols to OS-version-gated
+          # availability -- bundling our own means we never depend on it.
+          # LIBCXXABI_USE_LLVM_UNWINDER=OFF: Darwin has its own native
+          # unwinder in libSystem; libcxxabi's CMakeLists hard-fails if this
+          # is ON without libunwind also in LLVM_ENABLE_RUNTIMES.
+          # CMAKE_OSX_ARCHITECTURES isn't forwarded into the runtimes
+          # sub-build automatically (confirmed via llvm/runtimes/CMakeLists.txt),
+          # hence the explicit RUNTIMES_CMAKE_ARGS pass-through, matching
+          # duckdb's own -mmacosx-version-min=11.0.
           cmake -S llvm -B build -G Ninja \
             -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DLIBCXX_ENABLE_SHARED=OFF \
+            -DLIBCXX_ENABLE_STATIC=ON \
+            -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON \
+            -DLIBCXX_HERMETIC_STATIC_LIBRARY=ON \
+            -DLIBCXXABI_ENABLE_SHARED=OFF \
+            -DLIBCXXABI_ENABLE_STATIC=ON \
+            -DLIBCXXABI_HERMETIC_STATIC_LIBRARY=ON \
+            -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+            -DRUNTIMES_CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64\;x86_64;-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" \
             -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_EH=ON \
             -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
@@ -268,14 +296,42 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install"
           cmake --build build --parallel --target install clang lld opt
           ccache -s
+
+          # The Darwin clang driver auto-discovers bundled libc++ *headers*
+          # via <clang-bin>/../include/c++/v1 with no flags needed, but it
+          # never adds <clang-bin>/../lib to the linker's search path (unlike
+          # every other clang toolchain) -- so `-lc++` would still silently
+          # resolve against the ambient SDK/system dylib without this. A
+          # default config file (auto-loaded from the executable's own
+          # directory, see clang/docs/UsersManual.md "Configuration files")
+          # is the documented fix. Named to match wrap_toolchain.sh's
+          # clang.real/clang++.real rename (that script renames these
+          # .cfg files alongside the binaries) so this keeps working after
+          # the wrapper is bundled in.
+          echo "-L <CFGDIR>/../lib" > "${{ github.workspace }}/install/bin/clang.cfg"
+          echo "-L <CFGDIR>/../lib" > "${{ github.workspace }}/install/bin/clang++.cfg"
 
           echo 'int main(void){return 0;}' > /tmp/t.c
           "${{ github.workspace }}/install/bin/clang" -arch arm64 /tmp/t.c -o /tmp/t_arm64
           "${{ github.workspace }}/install/bin/clang" -arch x86_64 /tmp/t.c -o /tmp/t_x86_64
           /tmp/t_arm64
+
+          # Confirm libc++/libc++abi are statically linked in, not resolved
+          # against the system dylib (the exact bug being fixed here).
+          echo '#include <stdexcept>' > /tmp/t2.cpp
+          echo 'int main(void){ try { throw std::length_error("x"); } catch (const std::length_error&) { return 0; } return 1; }' >> /tmp/t2.cpp
+          "${{ github.workspace }}/install/bin/clang++" -arch arm64 -mmacosx-version-min=11.0 /tmp/t2.cpp -o /tmp/t2_arm64
+          /tmp/t2_arm64
+          if otool -L /tmp/t2_arm64 | grep -qi 'libc++'; then
+            echo "FAIL: still dynamically linked against a system libc++"
+            otool -L /tmp/t2_arm64
+            exit 1
+          fi
+          echo "OK: statically linked, no libc++ dylib dependency"
 
           sh "${{ github.workspace }}/wrapper/wrap_toolchain.sh" "${{ github.workspace }}/install"
 

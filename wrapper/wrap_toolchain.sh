@@ -21,6 +21,14 @@ mv "$BIN_DIR/clang++" "$BIN_DIR/clang++.real"
 cp "$SCRIPT_DIR/swan_obf_compiler_wrapper.py" "$BIN_DIR/swan_obf_compiler_wrapper.py"
 chmod +x "$BIN_DIR/swan_obf_compiler_wrapper.py"
 
+# macOS builds ship a default config file (clang.cfg/clang++.cfg, see
+# clang/docs/UsersManual.md "Configuration files") so the bundled static
+# libc++ is found at link time. Clang loads it by the *invoked* executable's
+# name -- since the wrapper always execs clang.real/clang++.real, the config
+# must follow the rename too, or it silently stops being picked up.
+[ -f "$BIN_DIR/clang.cfg" ] && mv "$BIN_DIR/clang.cfg" "$BIN_DIR/clang.real.cfg"
+[ -f "$BIN_DIR/clang++.cfg" ] && mv "$BIN_DIR/clang++.cfg" "$BIN_DIR/clang++.real.cfg"
+
 write_trampoline() {
     name=$1
     kind=$2
@@ -57,5 +65,29 @@ SMOKE
 "$BIN_DIR/clang++" -std=c++17 -O2 -c "$TMP_DIR/smoke.cpp" -o "$TMP_DIR/smoke.o"
 "$BIN_DIR/clang++" "$TMP_DIR/smoke.o" -o "$TMP_DIR/smoke"
 "$TMP_DIR/smoke"
+
+# Smoke check 3 (macOS only, where clang.real.cfg exists): confirm the
+# renamed-binary + default-config-file combination still resolves the
+# bundled static libc++ through the wrapper's passthrough (linking) path,
+# not just direct compiles. Exercises the exact scenario that motivated
+# bundling libc++ in the first place.
+if [ -f "$BIN_DIR/clang++.real.cfg" ]; then
+    cat > "$TMP_DIR/stdexcept_smoke.cpp" <<'SMOKE2'
+#include <stdexcept>
+int main() {
+    try { throw std::length_error("x"); }
+    catch (const std::length_error&) { return 0; }
+    return 1;
+}
+SMOKE2
+    "$BIN_DIR/clang++" -std=c++17 -c "$TMP_DIR/stdexcept_smoke.cpp" -o "$TMP_DIR/stdexcept_smoke.o"
+    "$BIN_DIR/clang++" "$TMP_DIR/stdexcept_smoke.o" -o "$TMP_DIR/stdexcept_smoke"
+    "$TMP_DIR/stdexcept_smoke"
+    if otool -L "$TMP_DIR/stdexcept_smoke" | grep -qi 'libc++'; then
+        echo "wrap_toolchain.sh: FAIL -- still dynamically linked against a system libc++ after wrapping"
+        otool -L "$TMP_DIR/stdexcept_smoke"
+        exit 1
+    fi
+fi
 
 echo "wrap_toolchain.sh: wrapped $BIN_DIR/clang and $BIN_DIR/clang++"
