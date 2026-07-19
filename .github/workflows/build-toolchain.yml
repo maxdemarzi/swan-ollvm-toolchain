@@ -340,7 +340,7 @@ jobs:
           # already-built compiler -- then lipo -create merge the two
           # per-arch archives into genuinely universal ones in the final
           # install tree.
-          cmake -S llvm-src/runtimes -B build-libcxx-x86_64 -G Ninja \
+          cmake -S runtimes -B build-libcxx-x86_64 -G Ninja \
             -DCMAKE_C_COMPILER="${{ github.workspace }}/install/bin/clang" \
             -DCMAKE_CXX_COMPILER="${{ github.workspace }}/install/bin/clang++" \
             -DCMAKE_OSX_ARCHITECTURES=x86_64 \
