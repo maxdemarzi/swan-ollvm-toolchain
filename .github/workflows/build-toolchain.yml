@@ -267,6 +267,26 @@ jobs:
           # LIBCXX_ENABLE_VENDOR_AVAILABILITY_ANNOTATIONS (default OFF) is
           # exactly the mechanism that ties symbols to OS-version-gated
           # availability -- bundling our own means we never depend on it.
+          # LIBCXX(ABI)_HERMETIC_STATIC_LIBRARY is deliberately OFF (not the
+          # LLVM default recommendation for a bundled static libc++): hermetic
+          # mode gives every one of its symbols hidden visibility so multiple
+          # unrelated static-libc++ consumers linked into the same process
+          # never clash -- but that hiding also applies to exception RTTI
+          # (typeinfo for std::exception/std::runtime_error/etc.), and Itanium
+          # C++ ABI cross-DSO exception matching requires that RTTI to be
+          # exported/mergeable. Confirmed via a direct repro: a hidden-
+          # visibility .dylib throwing std::runtime_error, caught by a
+          # separate binary, silently fails to match `catch (const
+          # std::exception&)` and falls through to `catch (...)` -- exactly
+          # what happened for every exception swan.duckdb_extension threw
+          # into DuckDB's own pipeline/task-scheduling code (which is a
+          # SEPARATE binary/process from the extension .dylib, i.e. exactly
+          # the boundary this crosses). Non-hermetic keeps the static
+          # linkage (still no runtime libc++.dylib version dependency) but
+          # leaves its exported symbols visible/mergeable, matching what a
+          # normal (non-hermetic) static libc++ build does -- and since swan
+          # is this toolchain's only real consumer, there's no known
+          # multi-consumer symbol-clash risk from turning hermetic off.
           # LIBCXXABI_USE_LLVM_UNWINDER=OFF: Darwin has its own native
           # unwinder in libSystem; libcxxabi's CMakeLists hard-fails if this
           # is ON without libunwind also in LLVM_ENABLE_RUNTIMES.
@@ -280,10 +300,10 @@ jobs:
             -DLIBCXX_ENABLE_SHARED=OFF \
             -DLIBCXX_ENABLE_STATIC=ON \
             -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON \
-            -DLIBCXX_HERMETIC_STATIC_LIBRARY=ON \
+            -DLIBCXX_HERMETIC_STATIC_LIBRARY=OFF \
             -DLIBCXXABI_ENABLE_SHARED=OFF \
             -DLIBCXXABI_ENABLE_STATIC=ON \
-            -DLIBCXXABI_HERMETIC_STATIC_LIBRARY=ON \
+            -DLIBCXXABI_HERMETIC_STATIC_LIBRARY=OFF \
             -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
             -DRUNTIMES_CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64\;x86_64;-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" \
             -DLLVM_ENABLE_RTTI=ON \
