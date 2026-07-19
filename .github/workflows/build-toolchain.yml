@@ -320,6 +320,61 @@ jobs:
           cmake --build build --parallel --target install clang lld opt
           ccache -s
 
+          # RUNTIMES_CMAKE_ARGS's CMAKE_OSX_ARCHITECTURES=arm64;x86_64 above
+          # does NOT actually produce a universal static libc++.a/libc++abi.a
+          # -- confirmed via a real CI failure (osx_amd64's build linking
+          # swan's own extension warned "found architecture arm64, required
+          # architecture x86_64" for every object in both archives; lipo -info
+          # on the published release asset independently confirmed they're
+          # arm64-only). The clang/opt/lld COMPILER binaries are unaffected
+          # by this -- they're native-arch tools that already correctly
+          # support code generation for both -arch arm64 and -arch x86_64
+          # (confirmed: highs's own x86_64 compile succeeded against this
+          # same clang) -- it's specifically the pre-built runtime archives
+          # that come out single-arch from the monolithic Ninja build above.
+          # Rather than debug why the implicit runtimes sub-build's
+          # multi-arch pass-through silently drops x86_64, build libcxx and
+          # libcxxabi a second time, standalone, explicitly for x86_64 only
+          # (llvm-project's own supported "build runtimes against an existing
+          # clang" entry point, <llvm-src>/runtimes), reusing the
+          # already-built compiler -- then lipo -create merge the two
+          # per-arch archives into genuinely universal ones in the final
+          # install tree.
+          cmake -S llvm-src/runtimes -B build-libcxx-x86_64 -G Ninja \
+            -DCMAKE_C_COMPILER="${{ github.workspace }}/install/bin/clang" \
+            -DCMAKE_CXX_COMPILER="${{ github.workspace }}/install/bin/clang++" \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DLIBCXX_ENABLE_SHARED=OFF \
+            -DLIBCXX_ENABLE_STATIC=ON \
+            -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON \
+            -DLIBCXX_HERMETIC_STATIC_LIBRARY=OFF \
+            -DLIBCXXABI_ENABLE_SHARED=OFF \
+            -DLIBCXXABI_ENABLE_STATIC=ON \
+            -DLIBCXXABI_HERMETIC_STATIC_LIBRARY=OFF \
+            -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install-x86_64"
+          cmake --build build-libcxx-x86_64 --parallel --target install
+          ccache -s
+
+          for lib in libc++.a libc++abi.a; do
+            arm64_lib="${{ github.workspace }}/install/lib/$lib"
+            x86_64_lib="${{ github.workspace }}/install-x86_64/lib/$lib"
+            if [ ! -f "$x86_64_lib" ]; then
+              echo "FAIL: expected standalone x86_64 runtimes build to produce $x86_64_lib"
+              find "${{ github.workspace }}/install-x86_64" -name "$lib"
+              exit 1
+            fi
+            lipo -info "$arm64_lib" "$x86_64_lib"
+            lipo -create "$arm64_lib" "$x86_64_lib" -output "$arm64_lib.universal"
+            mv "$arm64_lib.universal" "$arm64_lib"
+            lipo -info "$arm64_lib"
+          done
+
           # The Darwin clang driver auto-discovers bundled libc++ *headers*
           # via <clang-bin>/../include/c++/v1 with no flags needed, but it
           # never adds <clang-bin>/../lib to the linker's search path (unlike
@@ -350,7 +405,22 @@ jobs:
             otool -L /tmp/t2_arm64
             exit 1
           fi
-          echo "OK: statically linked, no libc++ dylib dependency"
+          echo "OK: statically linked, no libc++ dylib dependency (arm64)"
+
+          # x86_64 counterpart of the same check -- this is exactly what the
+          # lipo merge above exists to fix, so a compile+link failure here
+          # means that merge didn't actually produce a working universal
+          # archive. Can't execute the resulting binary directly on this
+          # arm64 runner (no Rosetta guaranteed), so this only proves
+          # link-time correctness, not the exception actually unwinding --
+          # the arm64 run above already covers that behavior.
+          "${{ github.workspace }}/install/bin/clang++" -arch x86_64 -mmacosx-version-min=11.0 /tmp/t2.cpp -o /tmp/t2_x86_64
+          if otool -L /tmp/t2_x86_64 | grep -qi 'libc++'; then
+            echo "FAIL: still dynamically linked against a system libc++"
+            otool -L /tmp/t2_x86_64
+            exit 1
+          fi
+          echo "OK: statically linked, no libc++ dylib dependency (x86_64)"
 
           sh "${{ github.workspace }}/wrapper/wrap_toolchain.sh" "${{ github.workspace }}/install"
 
