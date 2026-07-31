@@ -1,0 +1,79 @@
+diff --git a/llvm/lib/Passes/CMakeLists.txt b/llvm/lib/Passes/CMakeLists.txt
+index 6425f4934..a519c7b09 100644
+--- a/llvm/lib/Passes/CMakeLists.txt
++++ b/llvm/lib/Passes/CMakeLists.txt
+@@ -32,4 +32,5 @@ add_llvm_component_library(LLVMPasses
+   TransformUtils
+   Vectorize
+   Instrumentation
++  Obfuscator
+   )
+diff --git a/llvm/lib/Passes/PassBuilder.cpp b/llvm/lib/Passes/PassBuilder.cpp
+index a87991800..4453a5c32 100644
+--- a/llvm/lib/Passes/PassBuilder.cpp
++++ b/llvm/lib/Passes/PassBuilder.cpp
+@@ -333,6 +333,11 @@
+ #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
+ #include "llvm/Transforms/Vectorize/SandboxVectorizer/SandboxVectorizer.h"
+ #include "llvm/Transforms/Vectorize/VectorCombine.h"
++#include "llvm/Transforms/Obfuscator.h"
++#include "llvm/Transforms/Obfuscator/ObfuscationAnnotationAnalysis.h"
++#include "llvm/Transforms/Obfuscator/ObfDebug.h"
++#include "llvm/Transforms/Obfuscator/ObfMetrics.h"
++#include "llvm/Transforms/Obfuscator/FunctionObfContextAnalysis.h" // only if you register it
+ #include <optional>
+ 
+ using namespace llvm;
+diff --git a/llvm/lib/Passes/PassRegistry.def b/llvm/lib/Passes/PassRegistry.def
+index 017ae311c..5804e5d56 100644
+--- a/llvm/lib/Passes/PassRegistry.def
++++ b/llvm/lib/Passes/PassRegistry.def
+@@ -33,6 +33,9 @@ MODULE_ANALYSIS("profile-summary", ProfileSummaryAnalysis())
+ MODULE_ANALYSIS("stack-safety", StackSafetyGlobalAnalysis())
+ MODULE_ANALYSIS("verify", VerifierAnalysis())
+ 
++MODULE_ANALYSIS("obf-annotations", ObfuscationAnnotationAnalysis())
++MODULE_ANALYSIS("obf-report", ObfReportAnalysis())
++
+ #ifndef MODULE_ALIAS_ANALYSIS
+ #define MODULE_ALIAS_ANALYSIS(NAME, CREATE_PASS)                               \
+   MODULE_ANALYSIS(NAME, CREATE_PASS)
+@@ -153,6 +156,10 @@ MODULE_PASS("tsan-module", ModuleThreadSanitizerPass())
+ MODULE_PASS("verify", VerifierPass())
+ MODULE_PASS("view-callgraph", CallGraphViewerPass())
+ MODULE_PASS("wholeprogramdevirt", WholeProgramDevirtPass())
++
++MODULE_PASS("obfuscation", ObfuscationModulePass())
++MODULE_PASS("obf-dump-config", ObfDumpConfigPass())
++MODULE_PASS("obf-metrics", ObfMetricsPass())
+ #undef MODULE_PASS
+ 
+ #ifndef MODULE_PASS_WITH_PARAMS
+@@ -309,6 +316,9 @@ FUNCTION_ANALYSIS("target-lib-info", TargetLibraryAnalysis())
+ FUNCTION_ANALYSIS("uniformity", UniformityInfoAnalysis())
+ FUNCTION_ANALYSIS("verify", VerifierAnalysis())
+ 
++
++FUNCTION_ANALYSIS("function-obf-context", FunctionObfContextAnalysis())
++
+ #ifndef FUNCTION_ALIAS_ANALYSIS
+ #define FUNCTION_ALIAS_ANALYSIS(NAME, CREATE_PASS)                             \
+   FUNCTION_ANALYSIS(NAME, CREATE_PASS)
+@@ -492,6 +502,8 @@ FUNCTION_PASS("view-dom-only", DomOnlyViewer())
+ FUNCTION_PASS("view-post-dom", PostDomViewer())
+ FUNCTION_PASS("view-post-dom-only", PostDomOnlyViewer())
+ FUNCTION_PASS("wasm-eh-prepare", WasmEHPreparePass())
++
++FUNCTION_PASS("obfuscation-fn", ObfuscationFunctionDriverPass())
+ #undef FUNCTION_PASS
+ 
+ #ifndef FUNCTION_PASS_WITH_PARAMS
+diff --git a/llvm/lib/Transforms/CMakeLists.txt b/llvm/lib/Transforms/CMakeLists.txt
+index 7046f2f4b..5a6feff7c 100644
+--- a/llvm/lib/Transforms/CMakeLists.txt
++++ b/llvm/lib/Transforms/CMakeLists.txt
+@@ -9,3 +9,4 @@ add_subdirectory(ObjCARC)
+ add_subdirectory(Coroutines)
+ add_subdirectory(CFGuard)
+ add_subdirectory(HipStdPar)
++add_subdirectory(Obfuscator)
