@@ -11,7 +11,21 @@ if(NOT DEFINED AES_STUB_TARGET)
 endif()
 
 
-if(TARGET clang)
+if(DEFINED AES_STUB_CLANG_OVERRIDE)
+  # Explicit path wins over everything below. Exists because if(TARGET clang)
+  # is a configure-time check: in a build that only requests --target opt
+  # (this port's normal wasm build, see build-toolchain-wasm.yml), LLVM's own
+  # top-level CMakeLists processes lib/Transforms/ (and so this directory)
+  # before it ever adds clang as a project under LLVM_ENABLE_PROJECTS, so
+  # `clang` is never a defined target here even if it's also being built in
+  # the same ninja invocation -- confirmed directly: adding clang to
+  # --target still produced an AES stub compiled by manylinux's system
+  # clang, not the in-tree one, because the fallback below had already been
+  # selected at configure time. An externally-supplied, version-matched
+  # clang sidesteps that entirely.
+  set(_AES_CLANG_EXE "${AES_STUB_CLANG_OVERRIDE}")
+  set(_AES_CLANG_DEP "")
+elseif(TARGET clang)
   set(_AES_CLANG_EXE "$<TARGET_FILE:clang>")
   set(_AES_CLANG_DEP clang)
 else()

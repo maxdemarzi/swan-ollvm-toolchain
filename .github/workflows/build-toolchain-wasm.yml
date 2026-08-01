@@ -58,6 +58,26 @@ jobs:
             gcc --version
             g++ --version
 
+            # A version-matched clang for the AES stub only (see the big
+            # comment below) -- not used for anything else in this build.
+            # A prebuilt LLVM 20.1.x release, not the in-tree clang target:
+            # if(TARGET clang) in the aes_stub CMakeLists below is a
+            # configure-time check, and LLVM's own top-level CMakeLists
+            # processes lib/Transforms/ (where this port's aes_stub lives)
+            # before it ever adds clang as a project, even when clang is
+            # also requested in the same ninja invocation -- confirmed
+            # directly that building clang alongside opt did not fix this,
+            # the stub was still compiled by whatever generic clang find_
+            # program happened to locate. Bitcode-format compatibility
+            # across a minor version within the same LLVM major release is
+            # the norm, not an exception, and confirmed directly here too:
+            # this exact release's clang output parses cleanly with this
+            # exact LLVM_REF build's opt.
+            curl -sL -o /tmp/llvm201.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz
+            mkdir -p /tmp/llvm201
+            tar -xf /tmp/llvm201.tar.xz -C /tmp/llvm201 --strip-components=1
+            /tmp/llvm201/bin/clang --version
+
             git init llvm-src
             cd llvm-src
             git remote add origin https://github.com/llvm/llvm-project.git
@@ -73,25 +93,18 @@ jobs:
             cp -R /work/wasm/obfuscator-llvm20/src/lib/Transforms/Obfuscator llvm/lib/Transforms/Obfuscator
             git apply /work/wasm/obfuscator-llvm20/integration.patch
 
-            # LLVM_ENABLE_PROJECTS=clang: the wasm compile path itself never
-            # needs clang (compilation goes through Emscripten's own em++,
-            # never this toolchain's clang) -- but the aes_stub CMakeLists
-            # under src/lib/Transforms/Obfuscator/aes_stub does. It compiles
-            # aes_stub.c to LLVM bitcode via -emit-llvm, and that bitcode's
-            # format must match the LLVM 20 opt built alongside it exactly,
-            # or strenc's bitcode reader fails at runtime and silently skips
-            # encryption for the whole module. Confirmed directly: without
-            # this, the aes_stub CMakeLists own TARGET-clang-else-find_program
-            # fallback picks up manylinux_2_28's yum-installed system clang --
-            # LLVM 21.1.8 at the time this was found -- producing bitcode
-            # this LLVM 20 opt cannot parse (unknown attribute kind). Building
-            # clang from this exact LLVM_REF checkout, not a prebuilt
-            # release which could still be a minor version off, guarantees
-            # bitcode-format agreement -- matches build-toolchain.yml's own
-            # native build, which already builds clang and lld alongside opt
-            # for the same reason.
+            # No LLVM_ENABLE_PROJECTS: opt is a core LLVM tool, not part of
+            # the clang/lld projects -- the wasm compile path never needs
+            # those (compilation goes through Emscripten's own em++, never
+            # this toolchain's clang). aes_stub.c is compiled separately,
+            # above, by the version-matched prebuilt clang instead -- passed
+            # in explicitly via AES_STUB_CLANG_OVERRIDE, which src/lib/
+            # Transforms/Obfuscator/aes_stub's own CMakeLists.txt checks
+            # before its previous TARGET-clang-else-find_program fallback
+            # (see that CMakeLists.txt's own comment for why the fallback
+            # alone silently produced bitcode this opt could not parse).
             cmake -S llvm -B build -G Ninja \
-              -DLLVM_ENABLE_PROJECTS='clang' \
+              -DAES_STUB_CLANG_OVERRIDE=/tmp/llvm201/bin/clang \
               -DLLVM_ENABLE_RTTI=ON \
               -DLLVM_ENABLE_EH=ON \
               -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
@@ -102,7 +115,7 @@ jobs:
               -DCMAKE_C_COMPILER_LAUNCHER=ccache \
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DLLVM_PARALLEL_LINK_JOBS=1
-            cmake --build build --parallel --target opt clang
+            cmake --build build --parallel --target opt
             ccache -s
 
             ./build/bin/opt --version | tee /tmp/opt_version.txt
