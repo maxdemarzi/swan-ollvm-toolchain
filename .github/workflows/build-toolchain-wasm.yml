@@ -89,24 +89,24 @@ jobs:
 
             # A version-matched clang for the AES stub only (see the big
             # comment below) -- not used for anything else in this build.
-            # A prebuilt LLVM 20.1.x release, not the in-tree clang target:
-            # if(TARGET clang) in the aes_stub CMakeLists below is a
-            # configure-time check, and LLVM's own top-level CMakeLists
-            # processes lib/Transforms/ (where this port's aes_stub lives)
-            # before it ever adds clang as a project, even when clang is
-            # also requested in the same ninja invocation -- confirmed
-            # directly that building clang alongside opt did not fix this,
-            # the stub was still compiled by whatever generic clang find_
-            # program happened to locate. Bitcode-format compatibility
-            # across a minor version within the same LLVM major release is
-            # the norm, not an exception, and confirmed directly here too:
-            # this exact release's clang output parses cleanly with this
-            # exact LLVM_REF build's opt.
-            curl -sL -o /tmp/llvm201.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz
-            mkdir -p /tmp/llvm201
-            tar -xf /tmp/llvm201.tar.xz -C /tmp/llvm201 --strip-components=1
-            /tmp/llvm201/bin/clang --version
-
+            # Built in-tree from this exact LLVM_REF checkout, not a
+            # downloaded release: a prebuilt llvmorg-20.1.8 Linux-X64
+            # release clang parses stub bitcode fine (confirmed directly),
+            # but the release binary itself refuses to run inside this
+            # container -- it needs a newer glibc than manylinux_2_28
+            # ships (GLIBC_2.29/2.32/2.33/2.34 not found), which is
+            # exactly the old-glibc baseline manylinux_2_28 exists to
+            # guarantee, so a binary built on a modern distro was never
+            # going to run here. yum has no path to an LLVM 20 clang
+            # either (confirmed directly): the llvm-toolset module has
+            # exactly one stream, rhel8, resolving to 21.1.8, and EPEL's
+            # version-suffixed llvmN packages stop at 14 and don't ship a
+            # clang binary at all. Building clang from this job's own
+            # LLVM_REF checkout guarantees both an exact version/attribute
+            # match with the opt that must parse aes_stub's bitcode and a
+            # glibc this container can actually execute, since it's built
+            # natively here by gcc-toolset's own gcc/g++ (already
+            # installed above).
             git init llvm-src
             cd llvm-src
             git remote add origin https://github.com/llvm/llvm-project.git
@@ -122,18 +122,25 @@ jobs:
             cp -R /work/wasm/obfuscator-llvm20/src/lib/Transforms/Obfuscator llvm/lib/Transforms/Obfuscator
             git apply /work/wasm/obfuscator-llvm20/integration.patch
 
-            # No LLVM_ENABLE_PROJECTS: opt is a core LLVM tool, not part of
-            # the clang/lld projects -- the wasm compile path never needs
-            # those (compilation goes through Emscripten's own em++, never
-            # this toolchain's clang). aes_stub.c is compiled separately,
-            # above, by the version-matched prebuilt clang instead -- passed
-            # in explicitly via AES_STUB_CLANG_OVERRIDE, which src/lib/
-            # Transforms/Obfuscator/aes_stub's own CMakeLists.txt checks
-            # before its previous TARGET-clang-else-find_program fallback
-            # (see that CMakeLists.txt's own comment for why the fallback
-            # alone silently produced bitcode this opt could not parse).
+            # LLVM_ENABLE_PROJECTS=clang so aes_stub.c has a same-commit
+            # clang to compile against (see the big comment above). Still
+            # routed through AES_STUB_CLANG_OVERRIDE rather than the
+            # if(TARGET clang) auto-detection this port's aes_stub
+            # CMakeLists.txt also supports: that check runs at configure
+            # time, before LLVM's own top-level CMakeLists has added clang
+            # as a project, so it can never see clang as a real target no
+            # matter what's requested in the same ninja invocation --
+            # confirmed directly in an earlier attempt. The override path
+            # is a plain absolute path (this job's own -B build, so
+            # /work/llvm-src/build/bin/clang once built) that doesn't
+            # exist yet at configure time -- fine, since aes_stub's custom
+            # command only needs it to exist once that command actually
+            # runs, which is guaranteed below by building the clang
+            # target to completion first, in its own separate build
+            # invocation, before opt's.
             cmake -S llvm -B build -G Ninja \
-              -DAES_STUB_CLANG_OVERRIDE=/tmp/llvm201/bin/clang \
+              -DLLVM_ENABLE_PROJECTS=clang \
+              -DAES_STUB_CLANG_OVERRIDE=/work/llvm-src/build/bin/clang \
               -DLLVM_ENABLE_RTTI=ON \
               -DLLVM_ENABLE_EH=ON \
               -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
@@ -144,6 +151,7 @@ jobs:
               -DCMAKE_C_COMPILER_LAUNCHER=ccache \
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DLLVM_PARALLEL_LINK_JOBS=1
+            cmake --build build --parallel --target clang
             cmake --build build --parallel --target opt
             ccache -s
 
