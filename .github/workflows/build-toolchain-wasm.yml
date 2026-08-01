@@ -42,25 +42,37 @@ jobs:
           LLVM_REF=$(cat wasm/obfuscator-llvm20/LLVM_COMMIT)
           mkdir -p out
           mkdir -p "${{ github.workspace }}/.ccache"
-          # tsflags=nocontexts: four consecutive runs failed inside yum
-          # itself with "ValueError: SELinux policy is not managed or store
-          # cannot be accessed" partway through Development Tools, unrelated
-          # to anything in this workflow's own logic (the yum install lines
-          # are unchanged across every attempt, including the one build that
-          # succeeded before this became an issue). This is RPM's own file
-          # -context labeling step reaching into libselinux's policy store
-          # directly during package install, not an opt-in scriptlet --
-          # setting container=docker first (a systemd-detect-virt style
-          # signal some scriptlets check) did not help, confirming that.
-          # tsflags=nocontexts tells RPM's own transaction set to skip
-          # SELinux context-setting entirely, which is the actual failing
-          # operation, regardless of why it thinks it should run here. Did
-          # not reproduce locally (Docker Desktop's own VM is not the same
-          # environment as this runner), so validated via a real dispatch.
+          # Five consecutive runs failed inside yum itself with "ValueError:
+          # SELinux policy is not managed or store cannot be accessed",
+          # always right after installing perl-Error (package 135 of 175 in
+          # Development Tools), unrelated to anything in this workflow's own
+          # logic -- the yum install lines are unchanged across every
+          # attempt, including the one build that succeeded before this
+          # became an issue, and build-toolchain.yml's native build uses the
+          # identical groupinstall line. Neither container=docker (a
+          # systemd-detect-virt style signal some scriptlets check) nor
+          # --setopt=tsflags=nocontexts (disables RPM's own file-context
+          # labeling) made any difference -- ruling out RPM's core
+          # transaction behavior and opt-in scriptlets that check for a
+          # container runtime. Left tsflags=nocontexts in place (harmless,
+          # may still matter for something downstream) and added
+          # --disableplugin='*' as a broader net: this disables every dnf/
+          # yum plugin outright, which should bypass a plugin-driven
+          # SELinux integration regardless of which specific plugin it is --
+          # the remaining live hypothesis, since RPM's own core behavior is
+          # now ruled out. Also prints direct diagnostics on this runner's
+          # own SELinux visibility first, in case this doesn't work either
+          # and the actual mechanism needs to be read directly instead of
+          # guessed at again. Did not reproduce locally (Docker Desktop's
+          # own VM is not the same environment as this runner, confirmed:
+          # groupinstall succeeded cleanly there with no fix at all), so
+          # validated via real dispatches throughout.
           docker run --rm -v "${{ github.workspace }}":/work -w /work -e CCACHE_DIR=/work/.ccache quay.io/pypa/manylinux_2_28_x86_64 bash -lc "
             set -euxo pipefail
-            yum groupinstall -y --setopt=tsflags=nocontexts 'Development Tools'
-            yum install -y --setopt=tsflags=nocontexts curl zip unzip tar autoconf libtool ccache python3 zstd wget jq git clang
+            ls -la /sys/fs/selinux 2>&1 || echo 'no /sys/fs/selinux'
+            python3 -c 'import selinux; print(selinux.is_selinux_enabled())' 2>&1 || echo 'no python3 selinux module yet'
+            yum groupinstall -y --disableplugin='*' --setopt=tsflags=nocontexts 'Development Tools'
+            yum install -y --disableplugin='*' --setopt=tsflags=nocontexts curl zip unzip tar autoconf libtool ccache python3 zstd wget jq git clang
 
             # See build-toolchain.yml's linux_amd64 job for why a prebuilt
             # ninja binary instead of yum/pip -- same manylinux_2_28 image,
