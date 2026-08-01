@@ -73,10 +73,25 @@ jobs:
             cp -R /work/wasm/obfuscator-llvm20/src/lib/Transforms/Obfuscator llvm/lib/Transforms/Obfuscator
             git apply /work/wasm/obfuscator-llvm20/integration.patch
 
-            # No LLVM_ENABLE_PROJECTS: opt is a core LLVM tool, not part of the
-            # clang/lld projects -- the wasm path never needs those (compilation
-            # goes through Emscripten's own em++, never this toolchain's clang).
+            # LLVM_ENABLE_PROJECTS=clang: the wasm compile path itself never
+            # needs clang (compilation goes through Emscripten's own em++,
+            # never this toolchain's clang) -- but src/lib/Transforms/
+            # Obfuscator/aes_stub/CMakeLists.txt does. It compiles aes_stub.c
+            # to LLVM bitcode via `-emit-llvm`, and that bitcode's format must
+            # match the LLVM 20 `opt` built alongside it exactly, or strenc's
+            # bitcode reader fails at runtime and silently skips encryption
+            # for the whole module (confirmed directly: without this, the
+            # aes_stub CMakeLists' own `if(TARGET clang) ... else()
+            # find_program(clang ...)` fallback picks up manylinux_2_28's
+            # yum-installed system clang -- LLVM 21.1.8 at the time this was
+            # found -- producing bitcode this LLVM 20 opt can't parse:
+            # "Unknown attribute kind (102)"). Building clang from this exact
+            # LLVM_REF checkout (not a prebuilt release, which could still be
+            # a minor version off) guarantees bitcode-format agreement --
+            # matches build-toolchain.yml's own native build, which already
+            # builds clang;lld alongside opt for the same reason.
             cmake -S llvm -B build -G Ninja \
+              -DLLVM_ENABLE_PROJECTS='clang' \
               -DLLVM_ENABLE_RTTI=ON \
               -DLLVM_ENABLE_EH=ON \
               -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
@@ -87,7 +102,7 @@ jobs:
               -DCMAKE_C_COMPILER_LAUNCHER=ccache \
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DLLVM_PARALLEL_LINK_JOBS=1
-            cmake --build build --parallel --target opt
+            cmake --build build --parallel --target opt clang
             ccache -s
 
             ./build/bin/opt --version | tee /tmp/opt_version.txt
