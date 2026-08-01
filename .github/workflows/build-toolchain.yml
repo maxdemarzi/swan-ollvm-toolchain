@@ -69,12 +69,51 @@ jobs:
             gcc --version
             g++ --version
 
+            # A version-matched clang for the AES stub only (see the big
+            # comment at aes_stub/CMakeLists.txt in the ollvm fork itself for
+            # the full mechanism this feeds). Built from a clean, plain
+            # upstream llvm-project checkout at the release maxdemarzi/ollvm's
+            # own ollvm-22.x branch is based on -- not that fork itself:
+            # unlike swan's wasm-ported obfuscator (a separately-appliable
+            # patch onto vanilla LLVM), this fork wires the Obfuscator module
+            # into lib/Passes permanently, so its own clang always
+            # transitively depends on aes_stub_inc, which itself needs a
+            # clang to compile -- a genuine circular dependency, confirmed
+            # directly (same class of bug, same fix, already root-caused for
+            # the wasm case; see that investigation's own trail). Not a
+            # downloaded release either: this job runs inside manylinux_2_28
+            # specifically for portability of the artifact it produces, and a
+            # clang released by upstream LLVM's own (much newer) build
+            # environment does not run here at all (GLIBC_2.3x not found) --
+            # confirmed directly for the exact same reason during the wasm
+            # investigation. Building from source inside this same container
+            # sidesteps both problems at once.
+            git init bootstrap-src
+            cd bootstrap-src
+            git remote add origin https://github.com/llvm/llvm-project.git
+            git fetch --depth 1 origin llvmorg-22.1.8
+            git checkout FETCH_HEAD
+            cmake -S llvm -B build -G Ninja \
+              -DLLVM_ENABLE_PROJECTS=clang \
+              -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
+              -DLLVM_INCLUDE_TESTS=OFF -DLLVM_BUILD_TESTS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_ENABLE_ASSERTIONS=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DLLVM_PARALLEL_LINK_JOBS=1
+            cmake --build build --parallel --target clang
+            build/bin/clang --version
+            cd /work
+
             git clone --filter=blob:none https://github.com/maxdemarzi/ollvm.git llvm-src
             cd llvm-src
             git checkout '$OLLVM_REF'
 
             cmake -S llvm -B build -G Ninja \
               -DLLVM_ENABLE_PROJECTS='clang;lld' \
+              -DAES_STUB_CLANG_OVERRIDE=/work/bootstrap-src/build/bin/clang \
               -DLLVM_ENABLE_RTTI=ON \
               -DLLVM_ENABLE_EH=ON \
               -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
@@ -172,12 +211,36 @@ jobs:
             gcc --version
             g++ --version
 
+            # See the linux_amd64 job for the full reasoning on this
+            # bootstrap clang -- same mechanism, just running on the
+            # aarch64 host so the bootstrap and the real build both come out
+            # as native aarch64 binaries here instead of x86_64.
+            git init bootstrap-src
+            cd bootstrap-src
+            git remote add origin https://github.com/llvm/llvm-project.git
+            git fetch --depth 1 origin llvmorg-22.1.8
+            git checkout FETCH_HEAD
+            cmake -S llvm -B build -G Ninja \
+              -DLLVM_ENABLE_PROJECTS=clang \
+              -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
+              -DLLVM_INCLUDE_TESTS=OFF -DLLVM_BUILD_TESTS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_ENABLE_ASSERTIONS=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DLLVM_PARALLEL_LINK_JOBS=1
+            cmake --build build --parallel --target clang
+            build/bin/clang --version
+            cd /work
+
             git clone --filter=blob:none https://github.com/maxdemarzi/ollvm.git llvm-src
             cd llvm-src
             git checkout '$OLLVM_REF'
 
             cmake -S llvm -B build -G Ninja \
               -DLLVM_ENABLE_PROJECTS='clang;lld' \
+              -DAES_STUB_CLANG_OVERRIDE=/work/bootstrap-src/build/bin/clang \
               -DLLVM_ENABLE_RTTI=ON \
               -DLLVM_ENABLE_EH=ON \
               -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
@@ -256,6 +319,27 @@ jobs:
           SDKROOT_PATH=$(xcrun --show-sdk-path)
           echo "Using SDK: $SDKROOT_PATH"
 
+          # A version-matched clang for the AES stub only (see the big
+          # comment at aes_stub/CMakeLists.txt in this repo's own source for
+          # the full mechanism this feeds, and StringEncryption.cpp's
+          # linkStub() for why the module actually being processed needs to
+          # get the matching variant). A downloaded upstream release, not
+          # built from source here: unlike the Linux jobs (which build
+          # inside manylinux_2_28 specifically for artifact portability, and
+          # so can't run a release built against a newer glibc), this job
+          # runs directly on the macos-15 runner with no such constraint --
+          # confirmed directly, a stock llvmorg-22.1.8 release clang just
+          # runs here. This same download also directly covers
+          # AES_STUB_TARGETS below (both -target x86_64-... and -target
+          # arm64-... compile cleanly against it, confirmed directly) --
+          # no separate per-arch clang needed, since cross-arch codegen is a
+          # completely ordinary clang capability, not something special this
+          # toolchain's own build has to provide.
+          curl -sL -o /tmp/llvm-bootstrap.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-macOS-ARM64.tar.xz
+          mkdir -p /tmp/llvm-bootstrap
+          tar -xf /tmp/llvm-bootstrap.tar.xz -C /tmp/llvm-bootstrap --strip-components=1
+          /tmp/llvm-bootstrap/bin/clang --version
+
           # Bundle our own statically-linked libc++/libc++abi instead of
           # relying on whatever SDK/system libc++.dylib happens to be active
           # wherever this toolchain gets used. Without this, a vanilla
@@ -296,6 +380,8 @@ jobs:
           # duckdb's own -mmacosx-version-min=11.0.
           cmake -S llvm -B build -G Ninja \
             -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DAES_STUB_CLANG_OVERRIDE=/tmp/llvm-bootstrap/bin/clang \
+            -DAES_STUB_TARGETS="x86_64-apple-macosx11.0;arm64-apple-macosx11.0" \
             -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
             -DLIBCXX_ENABLE_SHARED=OFF \
             -DLIBCXX_ENABLE_STATIC=ON \
