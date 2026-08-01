@@ -75,21 +75,21 @@ jobs:
 
             # LLVM_ENABLE_PROJECTS=clang: the wasm compile path itself never
             # needs clang (compilation goes through Emscripten's own em++,
-            # never this toolchain's clang) -- but src/lib/Transforms/
-            # Obfuscator/aes_stub/CMakeLists.txt does. It compiles aes_stub.c
-            # to LLVM bitcode via `-emit-llvm`, and that bitcode's format must
-            # match the LLVM 20 `opt` built alongside it exactly, or strenc's
-            # bitcode reader fails at runtime and silently skips encryption
-            # for the whole module (confirmed directly: without this, the
-            # aes_stub CMakeLists' own `if(TARGET clang) ... else()
-            # find_program(clang ...)` fallback picks up manylinux_2_28's
-            # yum-installed system clang -- LLVM 21.1.8 at the time this was
-            # found -- producing bitcode this LLVM 20 opt can't parse:
-            # "Unknown attribute kind (102)"). Building clang from this exact
-            # LLVM_REF checkout (not a prebuilt release, which could still be
-            # a minor version off) guarantees bitcode-format agreement --
-            # matches build-toolchain.yml's own native build, which already
-            # builds clang;lld alongside opt for the same reason.
+            # never this toolchain's clang) -- but the aes_stub CMakeLists
+            # under src/lib/Transforms/Obfuscator/aes_stub does. It compiles
+            # aes_stub.c to LLVM bitcode via -emit-llvm, and that bitcode's
+            # format must match the LLVM 20 opt built alongside it exactly,
+            # or strenc's bitcode reader fails at runtime and silently skips
+            # encryption for the whole module. Confirmed directly: without
+            # this, the aes_stub CMakeLists own TARGET-clang-else-find_program
+            # fallback picks up manylinux_2_28's yum-installed system clang --
+            # LLVM 21.1.8 at the time this was found -- producing bitcode
+            # this LLVM 20 opt cannot parse (unknown attribute kind). Building
+            # clang from this exact LLVM_REF checkout, not a prebuilt
+            # release which could still be a minor version off, guarantees
+            # bitcode-format agreement -- matches build-toolchain.yml's own
+            # native build, which already builds clang and lld alongside opt
+            # for the same reason.
             cmake -S llvm -B build -G Ninja \
               -DLLVM_ENABLE_PROJECTS='clang' \
               -DLLVM_ENABLE_RTTI=ON \
