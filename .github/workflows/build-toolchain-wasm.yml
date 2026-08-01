@@ -87,60 +87,82 @@ jobs:
             gcc --version
             g++ --version
 
-            # A version-matched clang for the AES stub only (see the big
-            # comment below) -- not used for anything else in this build.
-            # Built in-tree from this exact LLVM_REF checkout, not a
-            # downloaded release: a prebuilt llvmorg-20.1.8 Linux-X64
-            # release clang parses stub bitcode fine (confirmed directly),
-            # but the release binary itself refuses to run inside this
-            # container -- it needs a newer glibc than manylinux_2_28
-            # ships (GLIBC_2.29/2.32/2.33/2.34 not found), which is
-            # exactly the old-glibc baseline manylinux_2_28 exists to
-            # guarantee, so a binary built on a modern distro was never
-            # going to run here. yum has no path to an LLVM 20 clang
-            # either (confirmed directly): the llvm-toolset module has
-            # exactly one stream, rhel8, resolving to 21.1.8, and EPEL's
-            # version-suffixed llvmN packages stop at 14 and don't ship a
-            # clang binary at all. Building clang from this job's own
-            # LLVM_REF checkout guarantees both an exact version/attribute
-            # match with the opt that must parse aes_stub's bitcode and a
-            # glibc this container can actually execute, since it's built
-            # natively here by gcc-toolset's own gcc/g++ (already
-            # installed above).
             git init llvm-src
             cd llvm-src
             git remote add origin https://github.com/llvm/llvm-project.git
             git fetch --depth 1 origin '$LLVM_REF'
             git checkout FETCH_HEAD
 
+            # Bootstrap clang: a version-matched clang for the AES stub
+            # only (see the cmake invocation further below), built from
+            # this exact LLVM_REF commit into its own separate build
+            # directory, BEFORE the Obfuscator module is grafted into
+            # this tree. Not a downloaded release: llvmorg-20.1.8's
+            # Linux-X64 release clang parses stub bitcode fine (confirmed
+            # directly), but the release binary itself refuses to run
+            # inside this container -- it needs a newer glibc than
+            # manylinux_2_28 ships (GLIBC_2.29/2.32/2.33/2.34 not found),
+            # which is exactly the old-glibc baseline manylinux_2_28
+            # exists to guarantee. yum has no path to an LLVM 20 clang
+            # either (confirmed directly): the llvm-toolset module has
+            # exactly one stream, rhel8, resolving to 21.1.8, and EPEL's
+            # version-suffixed llvmN packages stop at 14 and don't ship a
+            # clang binary regardless. Building in-tree guarantees both
+            # an exact version/attribute match with the opt that must
+            # later parse aes_stub's bitcode and a glibc this container
+            # can actually execute, since gcc-toolset's own gcc/g++
+            # (already installed above) builds it natively here.
+            #
+            # This has to be a clean, unpatched checkout, built to
+            # completion in its own build directory, rather than adding a
+            # clang target to the same build as opt below: the
+            # integration.patch applied further down wires Obfuscator
+            # into llvm/lib/Passes' own CMakeLists.txt and PassBuilder.cpp
+            # (see that patch -- it adds Obfuscator as a LINK_COMPONENTS
+            # entry of LLVMPasses), which both opt AND clang statically
+            # link. A clang built from the patched tree would therefore
+            # transitively depend on aes_stub.bc -- the exact file it's
+            # supposed to compile -- a real dependency cycle, not just an
+            # ordering problem: confirmed directly, an earlier attempt at
+            # building clang and opt together from the patched tree got
+            # partway through clang's own link dependencies before ninja
+            # tried to run the aes_stub.bc custom command and failed --
+            # plain No such file or directory -- since the clang it was
+            # supposed to use to compile that file did not exist yet.
+            cmake -S llvm -B build-bootstrap -G Ninja \
+              -DLLVM_ENABLE_PROJECTS=clang \
+              -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
+              -DLLVM_INCLUDE_TESTS=OFF -DLLVM_BUILD_TESTS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_ENABLE_ASSERTIONS=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DLLVM_PARALLEL_LINK_JOBS=1
+            cmake --build build-bootstrap --parallel --target clang
+            build-bootstrap/bin/clang --version
+
             # Graft the vendored obfuscator module onto this LLVM 20 base --
             # same source drop wasm_obf_wasm_compiler_wrapper.py's opt is built
             # from locally, see /work/wasm/obfuscator-llvm20/README.md for what
             # this is and why only 4 of 90 files needed real API adaptations.
+            # Only now, after the bootstrap clang above is fully built --
+            # see that step's own comment for why the ordering matters.
             cp /work/wasm/obfuscator-llvm20/src/include/llvm/Transforms/Obfuscator.h llvm/include/llvm/Transforms/Obfuscator.h
             cp -R /work/wasm/obfuscator-llvm20/src/include/llvm/Transforms/Obfuscator llvm/include/llvm/Transforms/Obfuscator
             cp -R /work/wasm/obfuscator-llvm20/src/lib/Transforms/Obfuscator llvm/lib/Transforms/Obfuscator
             git apply /work/wasm/obfuscator-llvm20/integration.patch
 
-            # LLVM_ENABLE_PROJECTS=clang so aes_stub.c has a same-commit
-            # clang to compile against (see the big comment above). Still
-            # routed through AES_STUB_CLANG_OVERRIDE rather than the
-            # if(TARGET clang) auto-detection this port's aes_stub
-            # CMakeLists.txt also supports: that check runs at configure
-            # time, before LLVM's own top-level CMakeLists has added clang
-            # as a project, so it can never see clang as a real target no
-            # matter what's requested in the same ninja invocation --
-            # confirmed directly in an earlier attempt. The override path
-            # is a plain absolute path (this job's own -B build, so
-            # /work/llvm-src/build/bin/clang once built) that doesn't
-            # exist yet at configure time -- fine, since aes_stub's custom
-            # command only needs it to exist once that command actually
-            # runs, which is guaranteed below by building the clang
-            # target to completion first, in its own separate build
-            # invocation, before opt's.
+            # No LLVM_ENABLE_PROJECTS here: opt is a core LLVM tool, not
+            # part of the clang project, and the bootstrap clang above
+            # already covers aes_stub.c -- passed in explicitly via
+            # AES_STUB_CLANG_OVERRIDE, which src/lib/Transforms/Obfuscator/
+            # aes_stub's own CMakeLists.txt checks before its previous
+            # TARGET-clang-else-find_program fallback (see that
+            # CMakeLists.txt's own comment for why the fallback alone
+            # silently produced bitcode this opt could not parse).
             cmake -S llvm -B build -G Ninja \
-              -DLLVM_ENABLE_PROJECTS=clang \
-              -DAES_STUB_CLANG_OVERRIDE=/work/llvm-src/build/bin/clang \
+              -DAES_STUB_CLANG_OVERRIDE=/work/llvm-src/build-bootstrap/bin/clang \
               -DLLVM_ENABLE_RTTI=ON \
               -DLLVM_ENABLE_EH=ON \
               -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
@@ -151,7 +173,6 @@ jobs:
               -DCMAKE_C_COMPILER_LAUNCHER=ccache \
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DLLVM_PARALLEL_LINK_JOBS=1
-            cmake --build build --parallel --target clang
             cmake --build build --parallel --target opt
             ccache -s
 
