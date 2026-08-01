@@ -42,37 +42,39 @@ jobs:
           LLVM_REF=$(cat wasm/obfuscator-llvm20/LLVM_COMMIT)
           mkdir -p out
           mkdir -p "${{ github.workspace }}/.ccache"
-          # Five consecutive runs failed inside yum itself with "ValueError:
+          # Six consecutive runs failed inside yum itself with "ValueError:
           # SELinux policy is not managed or store cannot be accessed",
           # always right after installing perl-Error (package 135 of 175 in
           # Development Tools), unrelated to anything in this workflow's own
           # logic -- the yum install lines are unchanged across every
           # attempt, including the one build that succeeded before this
-          # became an issue, and build-toolchain.yml's native build uses the
-          # identical groupinstall line. Neither container=docker (a
-          # systemd-detect-virt style signal some scriptlets check) nor
-          # --setopt=tsflags=nocontexts (disables RPM's own file-context
-          # labeling) made any difference -- ruling out RPM's core
-          # transaction behavior and opt-in scriptlets that check for a
-          # container runtime. Left tsflags=nocontexts in place (harmless,
-          # may still matter for something downstream) and added
-          # --disableplugin='*' as a broader net: this disables every dnf/
-          # yum plugin outright, which should bypass a plugin-driven
-          # SELinux integration regardless of which specific plugin it is --
-          # the remaining live hypothesis, since RPM's own core behavior is
-          # now ruled out. Also prints direct diagnostics on this runner's
-          # own SELinux visibility first, in case this doesn't work either
-          # and the actual mechanism needs to be read directly instead of
-          # guessed at again. Did not reproduce locally (Docker Desktop's
-          # own VM is not the same environment as this runner, confirmed:
-          # groupinstall succeeded cleanly there with no fix at all), so
-          # validated via real dispatches throughout.
+          # became an issue. container=docker, --setopt=tsflags=nocontexts,
+          # and --disableplugin='*' each made no difference in turn, ruling
+          # out an opt-in container-runtime check, RPM's own core file
+          # -context-labeling behavior, and any dnf/yum plugin.
+          #
+          # Diagnostics added alongside --disableplugin (this run) finally
+          # explain why: /sys/fs/selinux does not exist in this container at
+          # all, and python3's selinux module is not even installed yet
+          # before Development Tools runs (ModuleNotFoundError). That module
+          # is a transitive dependency pulled in partway through this same
+          # transaction -- meaning some *other* package's own %post
+          # scriptlet, not a plugin and not RPM's core transaction
+          # machinery, imports and calls it once it becomes available,
+          # independent of tsflags=nocontexts (which only ever covered
+          # RPM's own automatic context-setting, not arbitrary scriptlet
+          # code) and independent of --disableplugin (scriptlets are not
+          # dnf/yum plugins). tsflags=noscripts skips scriptlet execution
+          # entirely, which is the actual failing operation.
+          #
+          # Did not reproduce locally (Docker Desktop's own VM is not the
+          # same environment as this runner, confirmed: groupinstall
+          # succeeded cleanly there with no fix at all), so validated via
+          # real dispatches throughout.
           docker run --rm -v "${{ github.workspace }}":/work -w /work -e CCACHE_DIR=/work/.ccache quay.io/pypa/manylinux_2_28_x86_64 bash -lc "
             set -euxo pipefail
-            ls -la /sys/fs/selinux 2>&1 || echo 'no /sys/fs/selinux'
-            python3 -c 'import selinux; print(selinux.is_selinux_enabled())' 2>&1 || echo 'no python3 selinux module yet'
-            yum groupinstall -y --disableplugin='*' --setopt=tsflags=nocontexts 'Development Tools'
-            yum install -y --disableplugin='*' --setopt=tsflags=nocontexts curl zip unzip tar autoconf libtool ccache python3 zstd wget jq git clang
+            yum groupinstall -y --setopt=tsflags=nocontexts,noscripts 'Development Tools'
+            yum install -y --setopt=tsflags=nocontexts,noscripts curl zip unzip tar autoconf libtool ccache python3 zstd wget jq git clang
 
             # See build-toolchain.yml's linux_amd64 job for why a prebuilt
             # ninja binary instead of yum/pip -- same manylinux_2_28 image,
