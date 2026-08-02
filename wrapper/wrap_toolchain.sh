@@ -32,8 +32,21 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # readlink -f) does the resolving since it's already a hard dependency
 # of this script and behaves identically on both platforms this runs
 # on, unlike shell readlink's -f support.
-REAL_CLANG=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$BIN_DIR/clang")
-REAL_CLANGXX=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$BIN_DIR/clang++")
+#
+# basename, not the full realpath: this toolchain is built once, tarred
+# up, and extracted somewhere completely different by every consumer
+# (e.g. /tmp/ollvm in a CI job vs. the toolchain-build runner's own
+# ${{ github.workspace }}/install) -- an absolute-path symlink baked in
+# here would point at a path that only ever existed on the machine that
+# ran this script, breaking on every real consumer. Confirmed directly:
+# an absolute-realpath symlink produced FileNotFoundError the moment
+# swan_obf_compiler_wrapper.py tried to exec it after extraction
+# elsewhere. The resolved target always lives in this same bin/
+# directory (LLVM's multicall binaries are never split across
+# directories), so a same-directory relative symlink to just its
+# basename is both correct and portable.
+REAL_CLANG=$(python3 -c "import os,sys; print(os.path.basename(os.path.realpath(sys.argv[1])))" "$BIN_DIR/clang")
+REAL_CLANGXX=$(python3 -c "import os,sys; print(os.path.basename(os.path.realpath(sys.argv[1])))" "$BIN_DIR/clang++")
 
 rm -f "$BIN_DIR/clang" "$BIN_DIR/clang++"
 ln -s "$REAL_CLANG" "$BIN_DIR/clang.real"
