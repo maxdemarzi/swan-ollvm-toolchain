@@ -56,11 +56,21 @@ def find_compile_invocation(args):
     Deliberately conservative -- anything ambiguous (linking, --version
     probing, an explicit /clang:-S / -E requested by the caller, multiple
     sources) falls through to a plain passthrough call, mirroring
-    swan_obf_compiler_wrapper.py."""
-    if "/c" not in args:
+    swan_obf_compiler_wrapper.py.
+
+    Accepts both /c and -c (and /E,/P and -E,-P below) -- confirmed directly
+    against a real cmake+ninja+clang-cl invocation that CMake's own Clang-MSVC
+    frontend module generates -c, not /c, for the compile step (clang-cl
+    accepts both interchangeably; CMake just happens to prefer the GNU-style
+    spelling here). Checking only /c meant this function returned None on
+    every real compile, so the whole 3-step obfuscation dance silently never
+    ran at all -- the same "Windows never actually obfuscated" bug, just
+    hidden one layer deeper behind a wrapper that looked like it was doing
+    something."""
+    if "/c" not in args and "-c" not in args:
         return None
     for a in args:
-        if a in ("/E", "/P") or a.startswith("/clang:-S") or a.startswith("/clang:-E"):
+        if a in ("/E", "/P", "-E", "-P") or a.startswith("/clang:-S") or a.startswith("/clang:-E"):
             return None  # caller already wants something other than an object file
 
     source_idx = None
@@ -123,11 +133,21 @@ def main():
     os.close(fd_obf)
 
     try:
-        # Step 1: emit un-obfuscated IR. Drop /c and the original /Fo<...>
-        # token entirely -- neither has any effect once /clang:-emit-llvm
-        # is active (confirmed directly, see module docstring point 2), so
-        # leaving them in is at best inert clutter and at worst confusing.
-        ir_args = [a for i, a in enumerate(args) if i not in (fo_idx,) and a != "/c"]
+        # Step 1: emit un-obfuscated IR. Drop /c (or -c, see find_compile_invocation),
+        # the original /Fo<...> token, and a bare "--" token entirely.
+        # /c and /Fo<...> have no effect once /clang:-emit-llvm is active
+        # (confirmed directly, see module docstring point 2), so leaving them
+        # in is at best inert clutter. "--" (CMake's own "end of options,
+        # everything after is positional" marker, confirmed present in a
+        # real cmake-generated invocation immediately before the source
+        # path) is actively harmful here if left in: this step APPENDS new
+        # flags (/clang:-S etc.) after the filtered original args, and
+        # clang-cl -- like any conforming "--" implementation -- treats
+        # everything after an inherited "--" as a positional filename, not a
+        # flag, so those appended flags would be misread as (nonexistent)
+        # input files instead of being parsed as flags at all. Confirmed
+        # directly: "error: no such file or directory: '/clang:-S'".
+        ir_args = [a for i, a in enumerate(args) if i not in (fo_idx,) and a not in ("/c", "-c", "--")]
         ir_args += ["/clang:-S", "/clang:-emit-llvm", "-Xclang", "-disable-llvm-passes",
                     "/clang:-o", "/clang:" + ir_path]
         run([real] + ir_args)
@@ -194,10 +214,17 @@ def main():
         # Step 3: real codegen from the obfuscated IR, keeping every original
         # flag (opt level, target, etc.) so normal optimization still
         # applies -- clang-cl accepts a .ll file as an ordinary source
-        # argument here, no special-casing needed (see module docstring
-        # point 3).
-        final_args = list(args)
-        final_args[source_idx] = obf_path
+        # argument here, EXCEPT /TP or /TC (force-C++/force-C mode, which
+        # CMake's clang-cl frontend always adds for a real compile -- e.g.
+        # "-TP") must be dropped: confirmed directly, that flag overrides
+        # clang-cl's normal extension-based file-type detection, so with it
+        # still present clang-cl tried to parse the obfuscated IR text as
+        # C++ source instead of recognizing the .ll extension ("error: a
+        # type specifier is required for all declarations" on the IR's own
+        # "; ModuleID = ..." header comment). Dropping it is safe -- the
+        # language is now unambiguous from the .ll extension itself.
+        final_args = [obf_path if i == source_idx else a
+                      for i, a in enumerate(args) if a not in ("/TP", "/TC", "-TP", "-TC")]
         run([real] + final_args)
     finally:
         for p in (ir_path, obf_path):
