@@ -372,6 +372,38 @@ namespace {
                 break;  // module-wide: first occurrence wins
             }
 
+            // wasm: force the legacy XOR path regardless of what any
+            // individual function requested, never AES/ChaCha (both need
+            // linkStub()). This build's embedded AES stub bitcode is
+            // compiled for this CI job's own native host triple (nothing
+            // ever overrides AES_STUB_TARGET to wasm32-unknown-emscripten
+            // in build-toolchain-wasm.yml, and this vendored source tree
+            // predates upstream's selectStubVariant()/AES_STUB_TARGETS
+            // per-architecture fix), then linkStub() just force-relabels
+            // its triple/datalayout strings onto whatever module it's
+            // linking into -- it does NOT recompile it. The result is
+            // literal wrong-ISA code merged into a wasm32 module: not a
+            // codegen crash (the mismatch is silently tolerated), but,
+            // confirmed via a real dlopen()-based SIDE_MODULE reproduction
+            // (Emscripten dynamic linking, matching exactly how a DuckDB
+            // extension gets loaded), the linked-in stub's own presence
+            // corrupts the WHOLE module's global-constructor execution --
+            // strenc's own decrypt-at-load .strenc.init constructor (and
+            // any other unrelated constructor in the same module) silently
+            // never runs, so every "encrypted" string comes back as raw,
+            // still-encrypted garbage at runtime, not just weaker
+            // obfuscation. XOR needs no stub at all (no foreign bitcode
+            // ever gets linked in), and was confirmed end-to-end in the
+            // same repro to decrypt correctly and leave every other
+            // constructor in the module intact. Real fix (recompiling the
+            // stub for wasm32-unknown-emscripten, which needs a WebAssembly
+            // backend added to this job's bootstrap clang) tracked as
+            // separate follow-up work, not blocking on it here.
+            if (llvm::obf::TargetInfo::fromModule(M).IsWasm) {
+                Acc.useAES = false;
+                Acc.useChaCha = false;
+            }
+
             Cfg = Acc;
             if (!Any) { Cfg.enable = false; return; }
 
