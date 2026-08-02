@@ -83,7 +83,7 @@ def run(cmd):
 
 
 def extra_link_args(real, kind):
-    """-L<install>/lib plus, for C++, explicit -lc++abi -lc++.
+    """-L<install>/lib plus, for C++, an explicit C++ runtime link.
 
     Two independent problems, both traced to renaming clang++ to
     clang++.real (see wrap_toolchain.sh):
@@ -94,26 +94,35 @@ def extra_link_args(real, kind):
        through to a renamed binary the way its docs suggest it should --
        so -L<install>/lib is injected explicitly here instead.
 
-    2. Apple's Darwin driver implicitly adds -lc++ (and transitively
-       libc++abi) when it recognizes it's linking C++ -- but that
-       recognition also appears to be name-based (argv[0] containing
-       "clang++"), not e.g. based on object file content. Linking a .o
-       file (as opposed to compiling a .cpp file straight through)
-       through "clang++.real" produced a link with *zero* C++ runtime
-       symbols resolved at all (undefined ___gxx_personality_v0,
-       ___cxa_throw, vtable/typeinfo for the thrown type, etc.) even
-       though the object file itself was compiled correctly -- adding -L
-       alone did not fix it. Confirmed directly (bypassing this wrapper
-       entirely) that -lc++abi -lc++ resolves it completely. -L alone is
-       still correct/sufficient for the C case, which has no such
-       implicit-runtime-linking behavior to lose.
+    2. clang's driver implicitly adds the C++ runtime (-lc++ on Darwin,
+       -lstdc++ on Linux) when it recognizes it's linking C++ -- but that
+       recognition is name-based (the invoked executable's own basename
+       containing "clang++"), not e.g. based on object file content, and
+       "clang++.real" doesn't match whatever pattern the driver actually
+       checks for. Linking a .o file (as opposed to compiling a .cpp file
+       straight through, where the .cpp extension alone is enough to pick
+       the C++ frontend) through "clang++.real" produced a link with
+       *zero* C++ runtime symbols resolved at all (undefined
+       __gxx_personality_v0/__cxa_throw and missing basic_string/
+       exception internals on Linux, the Darwin-mangled equivalents on
+       macOS) even though the object file itself was compiled correctly
+       -- adding -L alone did not fix it. Confirmed directly on both
+       platforms that adding the right runtime link explicitly resolves
+       it completely: Linux's manifests as -lstdc++ (system libstdc++,
+       this toolchain never bundles libc++ there), Darwin's as the
+       already-bundled static -lc++abi -lc++. -L alone is still correct/
+       sufficient for the C case, which has no such implicit-runtime-
+       linking behavior to lose.
     """
     libdir = os.path.normpath(os.path.join(os.path.dirname(real), "..", "lib"))
     if not os.path.isdir(libdir):
         return []
     args = ["-L", libdir]
-    if kind == "cxx" and os.path.isfile(os.path.join(libdir, "libc++.a")):
-        args += ["-lc++abi", "-lc++"]
+    if kind == "cxx":
+        if os.path.isfile(os.path.join(libdir, "libc++.a")):
+            args += ["-lc++abi", "-lc++"]
+        else:
+            args += ["-lstdc++"]
     return args
 
 

@@ -16,8 +16,28 @@ INSTALL_DIR=$1
 BIN_DIR="$INSTALL_DIR/bin"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
-mv "$BIN_DIR/clang" "$BIN_DIR/clang.real"
-mv "$BIN_DIR/clang++" "$BIN_DIR/clang++.real"
+# Resolve to the real underlying binary BEFORE renaming anything. LLVM's
+# own install layout commonly symlinks clang++ to clang (not directly to
+# the versioned clang-N binary) -- standard multicall-binary convention,
+# confirmed both in this toolchain's own build output and independently
+# in manylinux's system clang package (clang++ -> clang -> clang-21).
+# Naively mv-ing clang/clang++ preserves clang++'s ORIGINAL symlink
+# target as the literal relative string "clang" -- once the trampoline
+# below is written to that same name, clang++.real's unchanged target
+# silently starts resolving to the trampoline instead of the real
+# compiler. Confirmed directly: this produced links with zero C++
+# runtime symbols resolved (every "C++" compile was actually running in
+# C mode under the hood), since the trampoline clang++.real ended up
+# pointing at is the *cc*-kind one, not the cxx-kind one. python3 (not
+# readlink -f) does the resolving since it's already a hard dependency
+# of this script and behaves identically on both platforms this runs
+# on, unlike shell readlink's -f support.
+REAL_CLANG=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$BIN_DIR/clang")
+REAL_CLANGXX=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$BIN_DIR/clang++")
+
+rm -f "$BIN_DIR/clang" "$BIN_DIR/clang++"
+ln -s "$REAL_CLANG" "$BIN_DIR/clang.real"
+ln -s "$REAL_CLANGXX" "$BIN_DIR/clang++.real"
 cp "$SCRIPT_DIR/swan_obf_compiler_wrapper.py" "$BIN_DIR/swan_obf_compiler_wrapper.py"
 chmod +x "$BIN_DIR/swan_obf_compiler_wrapper.py"
 
