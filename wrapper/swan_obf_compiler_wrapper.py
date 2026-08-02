@@ -83,10 +83,10 @@ def run(cmd):
 
 
 def extra_link_args(real, kind):
-    """-L<install>/lib plus, for C++, an explicit C++ runtime link.
+    """-lm always, plus -L<install>/lib and a C++ runtime link for kind=="cxx".
 
-    Two independent problems, both traced to renaming clang++ to
-    clang++.real (see wrap_toolchain.sh):
+    Three independent problems, all traced to renaming clang/clang++ to
+    clang.real/clang++.real (see wrap_toolchain.sh):
 
     1. clang's default-config-file auto-discovery (clang.cfg/clang++.cfg,
        see clang/docs/UsersManual.md) is keyed off the *invoked*
@@ -110,19 +110,31 @@ def extra_link_args(real, kind):
        platforms that adding the right runtime link explicitly resolves
        it completely: Linux's manifests as -lstdc++ (system libstdc++,
        this toolchain never bundles libc++ there), Darwin's as the
-       already-bundled static -lc++abi -lc++. -L alone is still correct/
-       sufficient for the C case, which has no such implicit-runtime-
-       linking behavior to lose.
+       already-bundled static -lc++abi -lc++.
+
+    3. The same renamed-basename problem also drops libm off the default
+       link line entirely, for BOTH clang.real and clang++.real -- unlike
+       problem 2, this is not gated behind kind=="cxx". Confirmed
+       directly: a real swan build failed linking a plain math-using
+       translation unit with "undefined reference to symbol
+       'acos@@GLIBC_2.2.5'" / "libm.so.6: error adding symbols: DSO
+       missing from command line", and a minimal repro reproduced the
+       identical failure for both the C and C++ cases -- so the earlier
+       "-L alone is still correct/sufficient for the C case" assumption
+       here was wrong. -lm is placed last (after the C++ runtime, when
+       present) since libstdc++/libc++ can themselves reference libm
+       symbols, and ld resolves left-to-right.
     """
     libdir = os.path.normpath(os.path.join(os.path.dirname(real), "..", "lib"))
     if not os.path.isdir(libdir):
-        return []
+        return ["-lm"]
     args = ["-L", libdir]
     if kind == "cxx":
         if os.path.isfile(os.path.join(libdir, "libc++.a")):
             args += ["-lc++abi", "-lc++"]
         else:
             args += ["-lstdc++"]
+    args += ["-lm"]
     return args
 
 
