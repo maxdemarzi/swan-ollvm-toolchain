@@ -26,6 +26,7 @@ caller, multiple sources) passes straight through to the real compiler
 unmodified.
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,65 @@ def run(cmd):
         sys.exit(proc.returncode)
 
 
+def find_system_libstdcxx():
+    """Locate the libstdc++ matching whatever system C++ compiler built this
+    environment's vcpkg dependencies (e.g. libhighs.a), via -print-file-name
+    -- the standard GCC/Clang driver mechanism for "where would you look for
+    this file", using that compiler's own internal search paths rather than
+    guessing a distro-specific location. Returns (dir, path) or None.
+
+    Why this exists, not just a bare -lstdc++: manylinux_2_28 (the actual
+    image extension-ci-tools' Linux Docker builds use) ships ONLY the
+    versioned runtime object (/usr/lib64/libstdc++.so.6) -- there is no
+    "-dev"-package-style bare libstdc++.so symlink anywhere on the default
+    linker search path, so a plain -lstdc++ fails outright ("cannot find
+    -lstdc++"). Confirmed directly (real manylinux_2_28 container):
+    `find / -iname libstdc++.so` finds nothing outside a gcc-toolset's own
+    private lib dir. Worse, that system .so.6 itself turned out to be too
+    OLD to fix this by itself even when referenced by exact filename
+    (-l:libstdc++.so.6): it lacks the std::__throw_bad_array_new_length()
+    symbol libhighs.a's real error needs (only the lower-level, differently
+    -mangled __cxa_throw_bad_array_new_length from the C++ ABI runtime is
+    present) -- confirmed via `nm -D`. That symbol only exists in the SAME
+    gcc-toolset's own newer libstdc++ (here, gcc-toolset-14, matching
+    "Compiler found: /opt/rh/gcc-toolset-14/root/usr/bin/c++" in the actual
+    CMake configure log for vcpkg's own dependency builds) -- reachable at
+    its OWN private path via c++/g++'s -print-file-name, not any general
+    system location. That path resolves to a GNU ld linker script (not a
+    real .so), which itself pulls in both the real versioned .so.6 AND
+    -lstdc++_nonshared -- confirmed directly that both the script's own
+    directory needs to be on the -L search path (for its internal
+    -lstdc++_nonshared reference to resolve) AND the script's own full path
+    must be passed as a direct link input (bare -lstdc++ against this same
+    -L would resolve to the same OLD system .so.6 first via normal search
+    order, missing the symbol again) -- verified end-to-end with a real
+    compile+link+run reproducing libhighs.a's exact failure, both without
+    this fix (fails identically) and with it (links and runs correctly).
+    """
+    for cxx in ("c++", "g++"):
+        path = shutil.which(cxx)
+        if not path:
+            continue
+        try:
+            # stdout=/stderr=PIPE, not capture_output=True: this must run
+            # under whatever python3 a minimal build image ships (confirmed
+            # directly: manylinux_2_28's is 3.6, predating capture_output).
+            proc = subprocess.run(
+                [cxx, "-print-file-name=libstdc++.so"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True, timeout=10,
+            )
+            out = proc.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        # GCC/Clang's own convention: -print-file-name echoes the query
+        # back unchanged if it has no idea where the file might be.
+        if not out or out == "libstdc++.so" or not os.path.isfile(out):
+            continue
+        return os.path.dirname(out), out
+    return None
+
+
 def extra_link_args(real, kind):
     """-lm always, plus -L<install>/lib and a C++ runtime link for kind=="cxx".
 
@@ -106,11 +166,14 @@ def extra_link_args(real, kind):
        __gxx_personality_v0/__cxa_throw and missing basic_string/
        exception internals on Linux, the Darwin-mangled equivalents on
        macOS) even though the object file itself was compiled correctly
-       -- adding -L alone did not fix it. Confirmed directly on both
-       platforms that adding the right runtime link explicitly resolves
-       it completely: Linux's manifests as -lstdc++ (system libstdc++,
-       this toolchain never bundles libc++ there), Darwin's as the
-       already-bundled static -lc++abi -lc++.
+       -- adding -L alone did not fix it. Darwin's fix is the
+       already-bundled static -lc++abi -lc++. Linux's real fix is NOT a
+       bare -lstdc++ -- see find_system_libstdcxx()'s own docstring for
+       why a plain -lstdc++ silently fails (or worse, silently resolves
+       to a too-old libstdc++ missing a symbol a vcpkg dependency like
+       libhighs.a actually needs) on the real manylinux_2_28 build image,
+       and bare -lstdc++ is kept only as a last-resort fallback when no
+       system compiler is available to ask.
 
     3. The same renamed-basename problem also drops libm off the default
        link line entirely, for BOTH clang.real and clang++.real -- unlike
@@ -126,14 +189,17 @@ def extra_link_args(real, kind):
        symbols, and ld resolves left-to-right.
     """
     libdir = os.path.normpath(os.path.join(os.path.dirname(real), "..", "lib"))
-    if not os.path.isdir(libdir):
-        return ["-lm"]
-    args = ["-L", libdir]
+    args = ["-L", libdir] if os.path.isdir(libdir) else []
     if kind == "cxx":
         if os.path.isfile(os.path.join(libdir, "libc++.a")):
             args += ["-lc++abi", "-lc++"]
         else:
-            args += ["-lstdc++"]
+            found = find_system_libstdcxx()
+            if found:
+                stdcxx_dir, stdcxx_path = found
+                args += ["-L", stdcxx_dir, stdcxx_path]
+            else:
+                args += ["-lstdc++"]
     args += ["-lm"]
     return args
 
