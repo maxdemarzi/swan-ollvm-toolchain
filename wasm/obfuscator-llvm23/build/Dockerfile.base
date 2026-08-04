@@ -1,0 +1,15 @@
+FROM quay.io/pypa/manylinux_2_28_aarch64
+
+RUN yum groupinstall -y --setopt=tsflags=nocontexts,noscripts 'Development Tools' && \
+    yum install -y --setopt=tsflags=nocontexts,noscripts curl zip unzip tar autoconf libtool ccache python3 zstd wget jq git clang
+
+# The ninja GitHub release only ships an x86_64 binary; pip's own ninja
+# wheel is a real, native binary for whatever platform pip resolves to
+# (confirmed: manylinux aarch64 wheel exists), avoiding a Rosetta dependency
+# this container doesn't have working emulation for. The yum-installed
+# system python3 has no working pip (manylinux images deliberately steer
+# toward /opt/python/*'s own interpreters instead) -- use one of those.
+RUN /opt/python/cp312-cp312/bin/pip install ninja && \
+    ln -sf /opt/python/cp312-cp312/bin/ninja /usr/local/bin/ninja
+
+RUN gcc --version && g++ --version && ninja --version && cmake --version
