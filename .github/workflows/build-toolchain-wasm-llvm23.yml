@@ -1,0 +1,168 @@
+name: Build OLLVM Toolchain (wasm opt, LLVM 23)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to publish the built opt binary under (e.g. toolchain-wasm-llvm23-v1)'
+        required: true
+
+# Sibling of build-toolchain-wasm.yml (LLVM 20, matching Emscripten 3.1.71 --
+# used by swan's wasm_mvp/wasm_eh targets). This one matches Emscripten 5.0.3
+# (LLVM 23), which swan's newer wasm_eh_pyodide target needs -- see
+# wasm/obfuscator-llvm23/README.md for the full why (same "opt and the
+# compiler it feeds IR to must share exactly one LLVM version" requirement,
+# just a materially bigger version gap: 3 real API adaptations found and
+# fixed, vs. obfuscator-llvm20's 4, none overlapping -- LLVM 20 is the
+# outlier on the getTargetTriple() one specifically, see that README).
+# Same reasoning as that workflow for building only `opt` (no
+# LLVM_ENABLE_PROJECTS): compilation itself still goes through Emscripten's
+# own em++, this job only needs to produce the obfuscation pass itself.
+jobs:
+  linux_amd64:
+    name: Build opt (linux_amd64, LLVM 23)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "$AGENT_TOOLSDIRECTORY" || true
+          docker system prune -af || true
+          df -h
+
+      - name: Restore ccache dir
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ollvm-wasm-llvm23-ccache-linux_amd64-${{ hashFiles('wasm/obfuscator-llvm23/LLVM_COMMIT', 'wasm/obfuscator-llvm23/integration.patch') }}
+          restore-keys: ollvm-wasm-llvm23-ccache-linux_amd64-
+
+      - name: Build inside manylinux_2_28_x86_64
+        run: |
+          LLVM_REF=$(cat wasm/obfuscator-llvm23/LLVM_COMMIT)
+          mkdir -p out
+          mkdir -p "${{ github.workspace }}/.ccache"
+          # See build-toolchain-wasm.yml's own linux_amd64 job for the
+          # noscripts/SELinux background on this exact yum invocation --
+          # same manylinux_2_28 image, same fix applies here.
+          docker run --rm -v "${{ github.workspace }}":/work -w /work -e CCACHE_DIR=/work/.ccache quay.io/pypa/manylinux_2_28_x86_64 bash -lc "
+            set -euxo pipefail
+            yum groupinstall -y --setopt=tsflags=nocontexts,noscripts 'Development Tools'
+            yum install -y --setopt=tsflags=nocontexts,noscripts curl zip unzip tar autoconf libtool ccache python3 zstd wget jq git clang
+
+            curl -sL -o /tmp/ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip
+            unzip -o /tmp/ninja.zip -d /usr/local/bin
+            chmod +x /usr/local/bin/ninja
+            ninja --version
+
+            gcc --version
+            g++ --version
+
+            git init llvm-src-clean
+            cd llvm-src-clean
+            git remote add origin https://github.com/llvm/llvm-project.git
+            git fetch --depth 1 origin '$LLVM_REF'
+            git checkout FETCH_HEAD
+            cd ..
+            cp -r llvm-src-clean llvm-src
+
+            # Bootstrap clang, from the CLEAN (unpatched) tree -- see
+            # build-toolchain-wasm.yml's own comment on this same step for
+            # the full why (a version-matched clang is needed for the
+            # strenc pass's aes_stub.c only; building it from the PATCHED
+            # tree instead would create a real circular dependency, since
+            # integration.patch wires Obfuscator into LLVMPasses' own
+            # LINK_COMPONENTS, which clang itself links).
+            cmake -S llvm-src-clean/llvm -B build-bootstrap -G Ninja \
+              -DLLVM_ENABLE_PROJECTS=clang \
+              -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
+              -DLLVM_INCLUDE_TESTS=OFF -DLLVM_BUILD_TESTS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_ENABLE_ASSERTIONS=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DLLVM_PARALLEL_LINK_JOBS=1
+            cmake --build build-bootstrap --parallel --target clang
+            build-bootstrap/bin/clang --version
+
+            # Graft the vendored obfuscator module onto the PATCHED tree only.
+            cp /work/wasm/obfuscator-llvm23/src/include/llvm/Transforms/Obfuscator.h llvm-src/llvm/include/llvm/Transforms/Obfuscator.h
+            cp -R /work/wasm/obfuscator-llvm23/src/include/llvm/Transforms/Obfuscator llvm-src/llvm/include/llvm/Transforms/Obfuscator
+            cp -R /work/wasm/obfuscator-llvm23/src/lib/Transforms/Obfuscator llvm-src/llvm/lib/Transforms/Obfuscator
+            git -C llvm-src apply /work/wasm/obfuscator-llvm23/integration.patch
+
+            cmake -S llvm-src/llvm -B build -G Ninja \
+              -DAES_STUB_CLANG_OVERRIDE=/work/build-bootstrap/bin/clang \
+              -DLLVM_ENABLE_RTTI=ON \
+              -DLLVM_ENABLE_EH=ON \
+              -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
+              -DLLVM_INCLUDE_TESTS=OFF -DLLVM_BUILD_TESTS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_ENABLE_ASSERTIONS=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DLLVM_PARALLEL_LINK_JOBS=1
+            cmake --build build --parallel --target opt
+            ccache -s
+
+            ./build/bin/opt --version | tee /tmp/opt_version.txt
+            grep -q 'LLVM version 23\.' /tmp/opt_version.txt \
+              && echo 'OK: built opt reports LLVM 23' \
+              || (echo 'FAIL: built opt does not report LLVM 23' && exit 1)
+
+            mkdir -p /work/out/ollvm-opt-wasm-linux_amd64
+            cp build/bin/opt /work/out/ollvm-opt-wasm-linux_amd64/opt
+            cp /work/wasm/obfuscator-llvm23/README.md /work/out/ollvm-opt-wasm-linux_amd64/README.md
+            cp /work/wasm/obfuscator-llvm23/LLVM_COMMIT /work/out/ollvm-opt-wasm-linux_amd64/LLVM_COMMIT
+            cp /work/wasm/obfuscator-llvm23/OLLVM_SOURCE_COMMIT /work/out/ollvm-opt-wasm-linux_amd64/OLLVM_SOURCE_COMMIT
+            cd /work/out/ollvm-opt-wasm-linux_amd64 && tar -I zstd -cf /work/out/ollvm-opt-wasm-linux_amd64.tar.zst .
+          "
+
+      - name: Save ccache dir
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ollvm-wasm-llvm23-ccache-linux_amd64-${{ hashFiles('wasm/obfuscator-llvm23/LLVM_COMMIT', 'wasm/obfuscator-llvm23/integration.patch') }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ollvm-opt-wasm-linux_amd64
+          path: out/ollvm-opt-wasm-linux_amd64.tar.zst
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [linux_amd64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
+        with:
+          subject-path: artifacts/*
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: artifacts/*
+          draft: false

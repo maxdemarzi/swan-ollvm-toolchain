@@ -5,10 +5,31 @@ build against LLVM commit [`LLVM_COMMIT`](./LLVM_COMMIT) -- the LLVM version bun
 Emscripten 5.0.3, which the `wasm_eh_pyodide` extension target (swan's Pyodide/browser-Python
 build, see `docs/user/core/browser-pyodide.md` in the main `swan` repo) requires.
 
-**Status (2026-08-04): `opt` builds cleanly (`opt --version` reports `LLVM version 23.0.0git`).
-Obfuscation correctness (does it actually transform IR, does the resulting `.wasm` still work) is
-NOT yet verified -- see "Known gaps" below.** This directory was pushed as a WIP checkpoint rather
-than left sitting in a local scratch/temp directory.
+**Status (2026-08-04): `opt` builds cleanly (`opt --version` reports `LLVM version 23.0.0git`) AND
+obfuscation correctness is verified.** A real annotated test function (using swan's actual
+`SWAN_OBF_FN`/`SWAN_OBF_STRENC_MARKER` macros) was run through the full real pipeline (Emscripten
+5.0.3 IR emission -> this `opt` -> Emscripten 5.0.3 codegen): `flattening` demonstrably
+restructures control flow (basic-block/dispatcher growth), `strenc` demonstrably encrypts string
+literals at rest with correct runtime `__decrypt_string` call wiring (confirmed by inspecting the
+actual output IR, not the pass's own summary log -- see "A logging quirk" below), and the pipeline
+produces a valid final `.wasm` object with no errors. `mba`/`substitution`/`bcf` reported zero
+transformations on that specific small test function -- initially concerning, but reproduced
+*identically* (same "0 operations"/"0 blocks", including the same misleading log wording) by the
+already-in-production `obfuscator-llvm20` `opt` given the same input, proving it's a property of
+that small test function's shape (nsw/nuw poison flags excluding most sites, the rest apparently
+just not eligible), not an LLVM 23-specific regression. Not yet verified: a *real* swan extension
+source file (not a toy test function) end-to-end, and x86_64 (built/tested on aarch64 for
+iteration speed) -- see "Known gaps" below.
+
+### A logging quirk (pre-existing, not introduced by this port)
+
+`strenc`'s own verbose output prints `[strenc] done: 0 strings, 0 call sites` even when it
+successfully encrypts every eligible string literal in the function -- confirmed present
+identically on `obfuscator-llvm20`'s already-shipped `opt` too, so it's a pre-existing quirk in
+the pass's own logging (whatever counter that message reports isn't the one that actually gates
+encryption), not something this port broke. Don't trust that specific log line's literal "0" as
+evidence encryption didn't happen -- check the output IR for `@.enc_str`-style globals and a
+`__decrypt_string` call instead, the way this verification did.
 
 ## Why this exists, separately from `obfuscator-llvm20`
 
@@ -58,22 +79,21 @@ LLVM 23 base, the same way `obfuscator-llvm20` does for its own target.
 
 ## Known gaps
 
-- **Obfuscation correctness not yet verified.** A clean `opt` build only proves the Obfuscator
-  module's C++ compiles against LLVM 23's API -- it does not prove `-passes=obfuscation` actually
-  transforms IR correctly, or that Emscripten's `em++` (fed IR from this `opt`) still produces a
-  working `.wasm`. Next step: run the same wasm_eh_pyodide extension build through this `opt`,
-  then `scripts/verify_obfuscation.py` (from the main `swan` repo) against the result, the same
-  way every other obfuscated target is gated.
-- **`strenc`'s AES stub compatibility with LLVM 23 is untested.** `obfuscator-llvm20` documents a
-  known gap where its AES runtime stub (precompiled bitcode built against LLVM 22.1.8) fails to
-  link under LLVM 20's `opt`, so `strenc` silently falls back to skipping encryption. Whether the
-  same stub links cleanly under LLVM 23 has not been checked yet.
-- **x86_64 untested.** Built and verified on Apple Silicon (aarch64 Docker) for iteration speed
-  only -- `manylinux_2_28_x86_64` hasn't been tried.
-- **Not yet wired into CI.** `obfuscator-llvm20` has `.github/workflows/build-toolchain-wasm.yml`
-  at the repo root; this directory currently only has the ad hoc Docker recipe under `build/`
-  (a `Dockerfile.base` + shell script pair used to iterate locally), not yet turned into a real
-  workflow or a published toolchain release for `PublishWasmPyodide.yml` to depend on.
+- **Only a small, standalone test function verified, not a real swan extension source file.**
+  Obfuscation correctness above was proven via a real annotated test function compiled through
+  the real pipeline, not by running an actual `wasm_eh_pyodide` extension build through this
+  `opt` end-to-end. Next step: point `PublishWasmPyodide.yml`'s `build-extension-wasm-pyodide` job
+  at this toolchain and gate on `scripts/verify_obfuscation.py` (from the main `swan` repo), the
+  same way every other obfuscated target is.
+- **`strenc`'s AES cipher path specifically is untested.** The verification above ran with
+  `aes=0` (a non-AES cipher was used for that test's string encryption, per the pass's own
+  verbose log) -- `obfuscator-llvm20` documents a known gap where its AES runtime stub
+  (precompiled bitcode built against LLVM 22.1.8) fails to link under LLVM 20's `opt`, falling
+  back to skipping encryption silently. Whether the same stub links cleanly under LLVM 23, and
+  whether `aes=1` actually engages it correctly, has not been checked.
+- **x86_64 untested locally**, though `.github/workflows/build-toolchain-wasm-llvm23.yml` (added
+  alongside this update) builds on a real `ubuntu-24.04` (x86_64) runner, not Rosetta emulation --
+  once that workflow has run successfully at least once, this gap is closed.
 
 ## Building
 
